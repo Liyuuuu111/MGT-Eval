@@ -1,0 +1,51 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.4431429992126264,
+    "beta1": 6.547368507221297,
+    "standardize": true,
+    "mean": 0.9954237595051527,
+    "std": 0.00858205367290734,
+    "threshold_raw_p05": 0.9960046153100186
+  },
+  "meta": {
+    "detector": "TOCSIN[GPT-Neo-2.7B|GPT-Neo-2.7B|lrr]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 4000,
+      "pos": 2000,
+      "neg": 2000,
+      "auroc_on_scores": 0.8975240000000199,
+      "metrics_on_probs": {
+        "acc": 0.8405,
+        "precision": 0.819718309859155,
+        "recall": 0.873,
+        "f1": 0.8455205811138015,
+        "confusion": {
+          "tp": 1746,
+          "tn": 1616,
+          "fp": 384,
+          "fn": 254
+        },
+        "num_samples": 4000,
+        "num_pos": 2000,
+        "num_neg": 2000,
+        "auroc": 0.8975240000000199,
+        "aupr": 0.8563591493927062
+      },
+      "feature_dim": 1
+    },
+    "models": {
+      "model1": "/home/lyf/models/GPT-Neo-2.7B",
+      "model2": "/home/lyf/models/GPT-Neo-2.7B"
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

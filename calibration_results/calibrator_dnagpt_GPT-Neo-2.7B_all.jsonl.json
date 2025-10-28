@@ -1,0 +1,51 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -1.0940895865323397,
+    "beta1": 4.977754124440491,
+    "standardize": true,
+    "mean": -0.10936794900722022,
+    "std": 0.3556111525675349,
+    "threshold_raw_p05": -0.03120610148474233
+  },
+  "meta": {
+    "detector": "DNAGPT[GPT-Neo-2.7B]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 3878,
+      "pos": 1996,
+      "neg": 1882,
+      "auroc_on_scores": 0.9562942303310134,
+      "metrics_on_probs": {
+        "acc": 0.8924703455389376,
+        "precision": 0.8636573007830493,
+        "recall": 0.9393787575150301,
+        "f1": 0.8999280057595392,
+        "confusion": {
+          "tp": 1875,
+          "tn": 1586,
+          "fp": 296,
+          "fn": 121
+        },
+        "num_samples": 3878,
+        "num_pos": 1996,
+        "num_neg": 1882,
+        "auroc": 0.9562942303310134,
+        "aupr": 0.927727028306678
+      },
+      "feature_dim": 1
+    },
+    "models": {
+      "model1": "/home/lyf/models/GPT-Neo-2.7B",
+      "model2": null
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}
