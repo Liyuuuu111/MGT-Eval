@@ -29,6 +29,7 @@
 
 ### 从wheel安装
 
+先下载上述文件中的`mgt_eval-0.0.1-py3-none-any.whl`，然后按照如下流程安装：
 ```bash
 conda create -n test python=3.10 -y         # 创建虚拟环境，您可以将名称换成您喜欢的名字
 conda activate test         # 激活虚拟环境，您可以将名称换成您喜欢的名字
