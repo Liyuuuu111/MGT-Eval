@@ -1,6 +1,6 @@
 # MGTEval: 一个统一的MGT检测器评估框架
 
-欢迎使用MGTEval的0.0.1测试版本！本测试版本旨在测试所有基于逻辑的检测器（见[支持的检测器](#支持的检测器)部分）的逻辑、功能与跨平台迁移能力，以及包体能否在不同的电脑环境下安装。要完成测试，请详细阅读[检测器与接口](#检测器与接口)部分以调用合法的接口完成测试。
+欢迎使用MGTEval的0.0.1测试版本！本测试版本旨在测试所有基于逻辑的检测器（见[支持的检测器](#支持的检测器)部分）的逻辑、功能与跨平台迁移能力，以及包体能否在不同的电脑环境下安装。要完成测试，请详细阅读[检测器与接口](#检测器与接口)部分以调用合法的接口完成测试。测试者的测试任务在[您的任务](#您的任务)部分中。
 
 ## 支持的检测器
 
@@ -81,11 +81,11 @@ mgteval list
 | **likelihood**    | `model1=score_model`                                          | —                                                             | `max_len`, `device`, `use_bfloat16`, `threshold`                                                                                                                 | 似然基线                                    |
 | **rank**          | `model1=score_model`                                          | —                                                             | `max_len`, `device`, `use_bfloat16`                                                                                                                              | token rank 基线                           |
 | **logrank**       | `model1=score_model`                                          | —                                                             | `max_len`, `device`, `use_bfloat16`                                                                                                                              | log-rank 基线                             |
-| **lrr**           | `model1=score_model`                                          | —                                                             | `max_len`, `device`, `use_bfloat16`, `k_runs`, `calibrator_path`                                                                                                 | Log-Rank Ratio（支持外部校准器）                 |
-| **entropy**       | `model1=score_model`                                          | —                                                             | `use_analytic`, `distrib_params`, `max_length`, `fp16`, `group_cols`                                                                                             | 信息熵基线                                   |
+| **lrr**           | `model1=score_model`                                          | —                                                             | `max_len`, `device`, `use_bfloat16`                                                                                             | Log-Rank Ratio                |
+| **entropy**       | `model1=score_model`                                          | —                                                             | `use_analytic`, `distrib_params`, `max_length`, `fp16`                                                                                            | 信息熵基线                                   |
 | **dnagpt**        | `model1=score_model`                                          | —                                                          | `dataset_name`(如`squad`/`pubmed`)、`truncate_ratio`,`regen_number`,`max_len`,`do_top_k/p`,`top_k`,`top_p`,`temperature`,`device`,`use_bfloat16`                   | 若复现 PubMed 流程需正确 `dataset_name` 与长度下限   |
 | **npr**           | `model1=score_model`, `model2=mask_model`                     | —                                                             | `pct_words_masked`, `span_length`, `n_perturbation`, `chunk_size`, `buffer_size`, `mask_top_p`, `max_len`, `device`, `use_bfloat16`                              | 归一化 log-rank 扰动                         |
-| **raidar**        | `model1=rewrite_model`                                        | —                                                             | `calibrate_k`, `calibrate_seed`, `rewrite_input_max_tokens`, `max_new_tokens_factor`, `use_openai`, `openai_model`, `device`                                     | 含小样本自标定与改写器                             |
+| **raidar**        | `model1=rewrite_model`                                        | —                                                             | `rewrite_input_max_tokens`, `max_new_tokens_factor`, `use_openai`, `openai_model`, `device`                                     | 含小样本自标定与改写器                             |
 | **tocsin**        | `model1=score_model`, `model2=reference_model`                | `basemodel`(`Fast`/`lrr`/`likelihood`/`logrank`/`standalone`) , `bart_ckpt`(`path/to/your/bart_model`)| `mask_pct`, `perturb_per_text`, `dataset_file`, `max_len`, `device`, `use_bfloat16`                                                                 | `--basemodel`/`--bart_ckpt`为 CLI 顶层直达参数 |
 
 > **如何传参**
@@ -93,6 +93,13 @@ mgteval list
 > * 统一 CLI：**模型**用 `--model1/--model2`，其他入参统一走 `--detector_kwargs`（JSON 字符串），例如：
 >   `--detector_kwargs '{"max_len":512,"mode":"low-fpr"}'`
 > * 个别检测器在 CLI 还提供了直达参数（如 TOCSIN 的 `--basemodel`、`--bart_ckpt`），等价于在 JSON 中传递同名键。
+
+---
+
+> 常见参数解释：
+> * max_len: 控制传入检测器的最长句子的token数，比如如果设定max_len=400, 那么句子最长只会有400个token，超出这个长度会被截断。
+> * k_runs: 通用参数，控制抽样运行的次数（当抽样数量少于数据集总条数时，此参数有效）
+> * sample_k: 通用参数，控制抽取数据集的数据量
 
 ---
 
@@ -397,17 +404,24 @@ mgteval run \
 ## 常见问题（FAQ）
 
 1. **`--model1/--model2` 到底映射到哪个入参？**
+
    见上表“所需模型映射”。内部构造器会将统一接口映射到各检测器的实际 `__init__` 参数（比如 `observer/performer`、`score_model/mask_model` 等）。
 
 2. **样本抽样与全量评测**
+
    `--sample_k <= 0` 即全量评测。建议先用小样本做冒烟，再切全量出正式曲线。
 
 3. **半精度/混合精度**
+
    大多数检测器支持 `--bf16`（统一开关）或在 `--detector_kwargs` 传 `use_bfloat16/fp16`。显存吃紧时可适当降低 `batch_size` 与长度上限。
 
 4. **数据标签方向**
+
    均假定 `label=0` 为**人类**、`label=1` 为**机器**。如数据源相反，请先转换（或在你的加载器中交换标签）。
 
+5. **网络与模型加载问题**
+
+    我们假设您在本地下载好了数据集和模型，但是，如果您没有下载，那么代码会自动从HF中下载、加载模型。但是，由于网络限制，这通常会失败。如果您无法从HF中下载，请先尝试使用镜像源：`export HF_ENDPOINT=https://hf-mirror.com` (Linux)或`$env:HF_ENDPOINT = "https://hf-mirror.com"` (Windows)。如果实在无法下载，请您将模型下载到电脑，然后从电脑中转到服务器上（针对服务器用户）。
 ---
 
 ## 最小工作示例（从零到有）
@@ -446,14 +460,23 @@ mgteval run \
 
 ## 您的任务
 
-首先，我谨代表本项目的所有作者，向参加该项目的测试者表达真诚的感谢，您的参与不仅可以大大改善该项目的易用性、功能性，而且也对可信人工智能的发展做出了重要贡献。
+首先，我谨代表本项目的所有作者，向参加该项目的测试者表达真诚的感谢，您的参与不仅可以大大改善该项目的易用性、功能性，而且也对可信人工智能的发展做出了重要贡献。您的名字会出现在本项目的**致谢部分**中。
 
 您需要完成如下的几项任务：
 
 * 详细阅读项目文档（如上的md内容）
-* 使用wheel安装整个项目文件（见[安装](#安装)）部分。您可能可以不使用`conda`进行安装，可以使用`venv`或者尝试在自己的本地安装。
+* 使用wheel安装整个项目文件（见[安装](#安装)）部分。您可能可以不使用`conda`进行安装，可以使用`venv`或者尝试在自己的本地安装。安装过程中如果有缺少包的情况，请报告这个情况并手动安装该包。
 * 项目的基本功能测试：
   * i) 项目能否正常安装、正常使用`mgteval list`调用所有支持模型？
   * ii) 检测器能否通过命令行方式调用与校准？
   * iii) 检测器是否能够通过代码方式调用与校准？（代码调用与校准文件参考zip文件，应该可以直接使用）
-  * iv) 
+  * iv) 检测器的超参数是否能够正常使用？
+  * v) 检测器校准得到的文件是否正常放置到`/.local/share/mgt_eval`目录下？是否会自动加载校准文件？
+* 项目易用性测试：
+  * 您对本项目的易用性（学习成本、功能扩展以及检测器调用的便捷性）是否满意？
+  * 您对本项目的检测器输出信息感受如何？您认为项目输出的检测器指标是否全面？
+  * 您在使用数据集测试检测器时，所有的数据集都可以正常加载、使用吗？
+  * 您可以正常地加载模型、数据集吗？如果这些不是本地的，那么您能够正常从HF上下载吗？（对于服务器无法连接外部网络的情况，请见[模型下载处理](#常见问题faq)的内容）
+* 对项目的建设性意见：请提出几项对项目的建设性意见以及可能的改进，并报告该项目测试过程中的所有bug。
+
+再次感谢您对本项目做出的贡献！测试完成之后，请反馈测试情况。
