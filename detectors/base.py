@@ -29,6 +29,98 @@ class EvalResult:
     def to_dict(self):
         return asdict(self)
 
+# =========================
+# Display helpers (presentation only)
+# =========================
+W_PHASE = 8
+W_MEM   = 8
+W_N     = 4
+W_NUM   = 8
+W_STEP  = 8
+SEP     = " "
+
+def _gpu_mem_str() -> str:
+    """Current GPU reserved memory (GB-like, consistent with train.py style)."""
+    try:
+        if torch.cuda.is_available():
+            return f"{torch.cuda.memory_reserved() / 1e9:.3g}G"
+    except Exception:
+        pass
+    return "0G"
+
+def _fmt_float(x, fmt: str = ".4f") -> str:
+    if x is None:
+        return "-"
+    try:
+        return format(float(x), fmt)
+    except Exception:
+        return "-"
+
+def _summarize_thresholds(thrs: Dict[str, float], max_items: int = 8) -> str:
+    if not thrs:
+        return "-"
+    items = sorted(thrs.items(), key=lambda kv: str(kv[0]))
+    parts = []
+    for k, v in items[:max_items]:
+        try:
+            parts.append(f"{k}={float(v):.4f}")
+        except Exception:
+            parts.append(f"{k}=?")
+    if len(items) > max_items:
+        parts.append("...")
+    return ", ".join(parts)
+
+def _tpr_at_fpr_str(metrics: Dict[str, Any], targets: Tuple[float, ...]) -> str:
+    """
+    Presentation-only: try to extract TPR@FPR from metrics in a robust way.
+    Supports either:
+      - metrics["tpr_at_fpr"] as dict, or
+      - flat keys like "tpr@fpr=0.01", "tpr@fpr<=0.01", etc.
+    """
+    if not isinstance(metrics, dict) or not targets:
+        return "-"
+
+    # case 1: a dict field exists
+    tdict = metrics.get("tpr_at_fpr", None)
+    if isinstance(tdict, dict):
+        parts = []
+        for t in targets:
+            v = None
+            for k in (t, float(t), str(t), f"{t:g}", f"{t:.0e}"):
+                if k in tdict:
+                    v = tdict.get(k)
+                    break
+                # nested: {"0.01": {"tpr":..., "value":...}} etc
+                if k in tdict and isinstance(tdict.get(k), dict):
+                    cand = tdict[k]
+                    for kk in ("tpr", "value"):
+                        if isinstance(cand.get(kk), (int, float)):
+                            v = cand[kk]
+                            break
+            parts.append(f"{t:g}->{_fmt_float(v, '.4f')}")
+        return ", ".join(parts)
+
+    # case 2: search flat keys
+    parts = []
+    for t in targets:
+        v = None
+        key_cands = [
+            f"tpr@fpr={t}",
+            f"tpr@fpr<={t}",
+            f"tpr@fpr<{t}",
+            f"tpr@fpr={t:g}",
+            f"tpr@fpr<={t:g}",
+            f"tpr@fpr<{t:g}",
+            f"tpr@fpr={t:.0e}",
+            f"tpr@fpr<={t:.0e}",
+            f"tpr@fpr<{t:.0e}",
+        ]
+        for kc in key_cands:
+            if kc in metrics and isinstance(metrics[kc], (int, float)):
+                v = metrics[kc]
+                break
+        parts.append(f"{t:g}->{_fmt_float(v, '.4f')}")
+    return ", ".join(parts)
 
 class DetectorBase:
     """
@@ -45,14 +137,23 @@ class DetectorBase:
         # 缺省校准器名：一维分数 → Platt（逻辑回归）
         self.calibrator_name: str = kwargs.get("calibrator_name", "platt_lr")
         self._calibrator_params: Optional[Dict[str, Any]] = None
-
+        # NEW: 显式禁止 runner 校准（给 finetuned / 已输出概率的 detector 用）
+        # 允许子类通过 class attribute 设默认值，也允许 kwargs 覆盖
+        _cls_disable = bool(getattr(self, "disable_calibration", False))
+        self.disable_calibration: bool = bool(kwargs.get("disable_calibration", _cls_disable))
+        # NEW: 保留完整校准 meta + 从 meta 中解析出来的“推荐阈值们”
+        self._calibrator_full_meta: Optional[Dict[str, Any]] = None
+        self._calibrator_thresholds: Dict[str, float] = {}
+        # 推荐的单一决策阈值（如 dev 上按 acc/f1/tpr 模式选出来的阈值）
+        self.decision_threshold: Optional[float] = None
         # --- Binoculars 风格参数（作为回退方案）---
         self.prob_slope: float = float(kwargs.get("prob_slope", 8.0))
         self.prob_center: float = float(kwargs.get("prob_center", 0.0))
         self.prob_invert: bool = bool(kwargs.get("prob_invert", False))
 
-        # 检测器原生是否输出概率（Metric-based 一律 False；若子类已输出概率则置 True）
-        self.outputs_prob: bool = bool(kwargs.get("outputs_prob", False))
+        # 检测器原生是否输出概率：支持子类 class 默认值 + kwargs 覆盖
+        _cls_outputs = bool(getattr(self, "outputs_prob", False))
+        self.outputs_prob: bool = bool(kwargs.get("outputs_prob", _cls_outputs))
 
         # 自动校准：默认开启；可通过构造参数关闭
         self.auto_calibrate: bool = bool(kwargs.get("auto_calibrate", True))
@@ -485,11 +586,74 @@ class DetectorBase:
             with open(str(source), "r", encoding="utf-8") as f:
                 payload = json.load(f)
 
+        # NEW: 记录完整 meta，并从 meta.dev 中解析各种阈值字段
+        if isinstance(payload, dict) and "meta" in payload and isinstance(payload["meta"], dict):
+            self._calibrator_full_meta = payload["meta"]
+            dev_meta = (self._calibrator_full_meta.get("dev") or {}) if isinstance(self._calibrator_full_meta, dict) else {}
+            thresholds: Dict[str, float] = {}
+
+            # 1) dev.decision：常见结构：
+            #    {
+            #      "mode": "acc" / "f1" / "tpr",
+            #      "threshold": 0.73,
+            #      "thresholds": {
+            #          "acc":      0.70,
+            #          "f1":       0.72,
+            #          "tpr@0.01": 0.80,
+            #          ...
+            #      }
+            #    }
+            decision = (dev_meta.get("decision") or {}) if isinstance(dev_meta, dict) else {}
+            thr_main = decision.get("threshold", None)
+            if isinstance(thr_main, (int, float)):
+                thresholds["decision"] = float(thr_main)
+
+            dec_thrs = decision.get("thresholds") or {}
+            if isinstance(dec_thrs, dict):
+                for name, val in dec_thrs.items():
+                    v = None
+                    if isinstance(val, (int, float)):
+                        v = float(val)
+                    elif isinstance(val, dict):
+                        # 兼容 {"thr": x} 或 {"threshold": x}
+                        if isinstance(val.get("thr"), (int, float)):
+                            v = float(val["thr"])
+                        elif isinstance(val.get("threshold"), (int, float)):
+                            v = float(val["threshold"])
+                    if v is not None:
+                        thresholds[str(name)] = v
+
+            # 2) dev.tpr_at_fpr: {"0.01": {"threshold": ...}, ...}
+            tpr_at_fpr = dev_meta.get("tpr_at_fpr") or {}
+            if isinstance(tpr_at_fpr, dict):
+                for fpr_k, info in tpr_at_fpr.items():
+                    if not isinstance(info, dict):
+                        continue
+                    v = info.get("threshold", None)
+                    if isinstance(v, (int, float)):
+                        key = f"tpr@fpr<={fpr_k}"
+                        thresholds[key] = float(v)
+
+            # 保存解析结果
+            self._calibrator_thresholds = thresholds
+
+            # 3) 取出一个“首选决策阈值”
+            self.decision_threshold = None
+            if isinstance(thr_main, (int, float)):
+                # 直接使用 dev.decision.threshold
+                self.decision_threshold = float(thr_main)
+            else:
+                # 没有显式决策阈值时，优先用 FPR<=0.01 的点
+                for candidate_key in ("tpr@fpr<=0.01", "tpr@fpr<=0.010", "tpr@fpr<=1e-02"):
+                    if candidate_key in thresholds:
+                        self.decision_threshold = thresholds[candidate_key]
+                        break
+
+        # 原有逻辑：提取参数
         params = payload["calibrator"] if isinstance(payload, dict) and "calibrator" in payload else payload
         if "name" not in params:
             params["name"] = self.calibrator_name
         self._calibrator_params = params
-
 
     # —— 子类必须实现：返回“原始分数”或“概率”（由 self.outputs_prob 决定）——
     def score_batch(self, texts: List[Text]) -> np.ndarray:
@@ -553,7 +717,6 @@ class DetectorBase:
     def predict(self, probs: np.ndarray, threshold: float = 0.5) -> np.ndarray:
         return (probs >= threshold).astype(int)
 
-    # —— 统一评测：批量打分 → 概率（若需要）→ 预测 → 指标 —— #
     def evaluate(
         self,
         dataset: Iterable[Dict[str, Any]],
@@ -567,22 +730,25 @@ class DetectorBase:
         if not self.is_loaded:
             self.load()
 
-        # ===== 日志/元信息 =====
+        # ===== 基本信息提示（presentation only）=====
         method_name = getattr(self, "DETECTOR_NAME", self.__class__.__name__)
         method_type = getattr(self, "detector_type", "Unknown")
-        method_auth = getattr(self, "CITATION_AUTHORS", None)
-        method_link = getattr(self, "CITATION_LINK", None)
-        method_title = getattr(self, "CITATION_TITLE", None)
         device_hint = getattr(self, "device", None)
 
-        print(f"[MGTEval] You are using detector: {method_name} (Detector's Type: {method_type})")
-        if method_auth or method_link:
-            print(f"[MGTEval] Credits: {method_auth or 'Unknown authors'} | Paper: {method_title} | Link: {method_link or 'N/A'}")
-        print("[MGTEval] Disclaimer: This implementation may differ slightly from the original reference; "
-              "results might not exactly match those reported in the paper.")
+        print(f"[MGTEval] Detector: {method_name} | type={method_type} | outputs_prob={bool(self.outputs_prob)}")
         if device_hint:
-            print(f"[MGTEval] You are using device: {device_hint}")
-        print(f"[MGTEval] Batch size: {batch_size}")
+            print(f"[MGTEval] Device: {device_hint}")
+        print(f"[MGTEval] Eval config: batch_size={int(batch_size)} | threshold={float(threshold):.4f} | TPR@FPR targets={list(tpr_at_fpr)}")
+
+        # 校准器提示
+        cal_name = (self._calibrator_params or {}).get("name") if self._calibrator_params else None
+        print(f"[MGTEval] Calibration: auto={bool(self.auto_calibrate)} | force_runner={bool(self.force_runner_calibration)} | calibrator={cal_name or 'None'}")
+        if getattr(self, "calibrator_path", None):
+            print(f"[MGTEval] Calibrator path: {self.calibrator_path}")
+        if getattr(self, "_calibrator_thresholds", None):
+            print(f"[MGTEval] Recommended thresholds: {_summarize_thresholds(self._calibrator_thresholds)}")
+        if getattr(self, "decision_threshold", None) is not None and abs(float(threshold) - float(self.decision_threshold)) > 1e-9:
+            print(f"[MGTEval] Note: decision_threshold={float(self.decision_threshold):.4f} (you are using threshold={float(threshold):.4f}).")
 
         # ===== 数据展开 =====
         texts: List[str] = []
@@ -591,30 +757,45 @@ class DetectorBase:
             texts.append(ex["text"])
             labels.append(int(ex["label"]))
         labels_np = np.array(labels, dtype=int)
-        print(f"[MGTEval] Loaded {len(texts)} samples for evaluation.")
 
-        # ===== 批量打分 =====
+        n_total = len(texts)
+        n_pos = int(np.sum(labels_np == 1))
+        n_neg = int(np.sum(labels_np == 0))
+        print(f"[MGTEval] Loaded {n_total} samples (AI=1:{n_pos}, Human=0:{n_neg}).")
+
+        # ===== 批量打分（只改 tqdm 展示）=====
         t0 = time.perf_counter()
-        bs = max(1, batch_size)
-        total_batches = (len(texts) + bs - 1) // bs
-        iterator = range(0, len(texts), bs)
+        bs = max(1, int(batch_size))
+        total_batches = (n_total + bs - 1) // bs
+        iterator = range(0, n_total, bs)
+
+        if show_progress:
+            # 表头（train.py风格）
+            print("\n" +
+                f"{'Phase':>{W_PHASE}}{SEP}"
+                f"{'GPU_mem':>{W_MEM}}{SEP}{SEP}{SEP}{SEP}"
+                f"{'done':>{W_N}}{SEP}{SEP}"
+                f"{'eps':>{W_NUM}}{SEP}{SEP}"
+                f"{'ms/ex':>{W_NUM}}{SEP}{SEP}{SEP}{SEP}"
+                f"{'batch':>{W_STEP}}")
 
         pbar = tqdm(
             iterator,
             total=total_batches,
-            desc=f"Eval[{getattr(self, 'DETECTOR_NAME', self.__class__.__name__)}]",
+            desc=f"Eval[{method_name}]",
             dynamic_ncols=True,
             disable=(not show_progress),
-            leave=False, position=0, mininterval=0.5
+            leave=True,
+            mininterval=0.5,
         )
 
         all_scores: List[np.ndarray] = []
         expected_ndim: Optional[int] = None
 
         with torch.inference_mode():
-            for start in pbar:
-                s = self.score_batch(texts[start:start+bs])
-                a = np.asarray(s, dtype=np.float64)   # 不 reshape，保留 (B,) 或 (B,D)
+            for bidx, start in enumerate(pbar, start=1):
+                s = self.score_batch(texts[start:start + bs])
+                a = np.asarray(s, dtype=np.float64)  # keep (B,) or (B,D)
                 if expected_ndim is None:
                     expected_ndim = a.ndim
                 elif a.ndim != expected_ndim:
@@ -623,53 +804,85 @@ class DetectorBase:
                     )
                 all_scores.append(a)
 
+                # ---- tqdm 描述（presentation only）----
+                if show_progress:
+                    done = min(start + bs, n_total)
+                    elapsed = time.perf_counter() - t0
+                    eps = (done / elapsed) if elapsed > 0 else 0.0
+                    ms = (1000.0 / eps) if eps > 0 else 0.0
+                    mem = _gpu_mem_str()
+                    desc = (
+                        f"{'Eval':>{W_PHASE}}{SEP}"
+                        f"{mem:>{W_MEM}}{SEP}"
+                        f"{done:>{W_N}d}/{n_total:<{W_N}d}{SEP}"
+                        f"{eps:>{W_NUM}.2f}{SEP}"
+                        f"{ms:>{W_NUM}.2f}{SEP}"
+                        f"{bidx:>{W_STEP}d}/{total_batches:<{W_STEP}d}"
+                    )
+                    pbar.set_description(desc)
+
         infer_sec = time.perf_counter() - t0
 
         if all_scores:
-            scores = np.concatenate(all_scores, axis=0)   # (N,) 或 (N,D)
+            scores = np.concatenate(all_scores, axis=0)  # (N,) or (N,D)
         else:
             scores = np.zeros((0,), dtype=np.float64)
 
-        infer_sec = time.perf_counter() - t0
-        avg_infer_ms = (infer_sec / max(1, len(texts))) * 1e3
-        throughput = (len(texts) / infer_sec) if infer_sec > 0 else 0.0
-        scores = np.concatenate(all_scores, axis=0) if all_scores else np.zeros((0,), dtype=np.float64)
+        avg_infer_ms = (infer_sec / max(1, n_total)) * 1e3
+        throughput = (n_total / infer_sec) if infer_sec > 0 else 0.0
+        print(f"[MGTEval] Scoring done: time={infer_sec:.3f}s | avg={avg_infer_ms:.3f} ms/ex | throughput={throughput:.2f} ex/s")
 
-        # ===== 概率（兼容“原生概率”与“分数→概率”）=====
+        # ===== 概率映射（只补充 mode 提示，不改逻辑）=====
         prob_mode = None
-        if self.outputs_prob:
+        if self.outputs_prob or method_type in {"Model-based"}:
             probs = np.clip(np.asarray(scores, dtype=np.float64), 1e-6, 1.0 - 1e-6).astype(np.float32)
             prob_mode = "native_prob"
         else:
             if self.force_runner_calibration:
-                # 1) 优先用已加载的 JSON 校准器（platt 或 linear）
                 if self._calibrator_params is not None:
                     probs, used_mode = self._runner_apply_loaded_calibrator(np.asarray(scores))
                     prob_mode = used_mode
-                # 2) 否则若有标签 → 在线拟合（Platt/Linear）
                 elif labels_np is not None and len(labels_np) == len(scores):
                     probs, used_mode = self._runner_fit_and_apply_inline(np.asarray(scores), labels_np)
                     prob_mode = used_mode
-                # 3) 最后兜底（仅 1D）
                 else:
                     probs = self._fallback_sigmoid_1d_only(np.asarray(scores))
                     prob_mode = "binoculars_sigmoid"
             else:
-                # 保留旧行为（可通过 force_runner_calibration=False 关闭）
                 probs = self.calibrate(np.asarray(scores), labels_np)
                 prob_mode = "learned_lr" if (self._calibrator_params is not None) else "binoculars_sigmoid"
 
-        # 统一成 1-D
         probs = np.asarray(probs).reshape(-1).astype(np.float32)
+        print(f"[MGTEval] Prob mapping mode: {prob_mode}")
 
-        # ===== 预测与指标 =====
+        # ===== 预测与指标（不改计算，只改展示）=====
         preds = self.predict(probs, threshold=threshold).astype(int)
         metrics = compute_metrics(labels_np, probs, preds, tpr_at_fpr=tpr_at_fpr)
 
-        # ===== 元信息 =====
+        # 只展示常用几项（存在则显示）
+        acc = metrics.get("acc", None)
+        f1  = metrics.get("f1", None)
+        auroc = metrics.get("auroc", None)
+        aupr  = metrics.get("aupr", None)
+        ece   = metrics.get("ece", None)
+        brier = metrics.get("brier", None)
+        tpr_line = _tpr_at_fpr_str(metrics, tpr_at_fpr)
+
+        print(
+            "[MGTEval] Metrics: "
+            f"Acc={_fmt_float(acc, '.4f')} | "
+            f"F1={_fmt_float(f1, '.4f')} | "
+            f"AUROC={_fmt_float(auroc, '.4f')} | "
+            f"AUPR={_fmt_float(aupr, '.4f')} | "
+            f"ECE={_fmt_float(ece, '.4f')} | "
+            f"Brier={_fmt_float(brier, '.4f')}"
+        )
+        print(f"[MGTEval] TPR@FPR: {tpr_line}")
+
+        # ===== meta（不改字段结构，只补充展示相关可审计信息）=====
         meta: Dict[str, Any] = {
             "detector": getattr(self, "DETECTOR_NAME", "detector"),
-            "num_examples": len(texts),
+            "num_examples": n_total,
             "threshold": threshold,
             "tpr_at_fpr_targets": list(tpr_at_fpr),
             "kwargs": self.kwargs,
@@ -682,7 +895,6 @@ class DetectorBase:
                 "batch_size": int(batch_size),
                 **({"device": getattr(self, "device", None)} if hasattr(self, "device") else {}),
             },
-            # 记录概率映射配置，便于审计
             "prob_mapping": {
                 "mode": prob_mode,
                 "slope": float(self.prob_slope),
@@ -694,9 +906,21 @@ class DetectorBase:
             },
         }
 
-        # —— 统一返回 —— #
-        scores_out = scores.astype(float).tolist()
-        probs_out = probs.astype(float).tolist()
+        if getattr(self, "_calibrator_full_meta", None) is not None:
+            meta["calibrator_meta"] = self._calibrator_full_meta
+        if getattr(self, "_calibrator_thresholds", None):
+            meta.setdefault("thresholds", {})
+            for k, v in self._calibrator_thresholds.items():
+                if k not in meta["thresholds"]:
+                    meta["thresholds"][k] = float(v)
+        if getattr(self, "decision_threshold", None) is not None:
+            meta.setdefault("thresholds", {})
+            if "decision" not in meta["thresholds"]:
+                meta["thresholds"]["decision"] = float(self.decision_threshold)
+
+        # ===== return（不改结构）=====
+        scores_out = np.asarray(scores).astype(float).tolist()
+        probs_out = np.asarray(probs).astype(float).tolist()
 
         return EvalResult(
             scores=scores_out,
@@ -706,3 +930,4 @@ class DetectorBase:
             metrics=metrics,
             meta=meta,
         )
+

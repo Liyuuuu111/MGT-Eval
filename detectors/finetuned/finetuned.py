@@ -82,7 +82,11 @@ class TrainCfg:
     seed: int = 114514
     device: Optional[str] = None
     name: Optional[str] = None
-
+    # ---- runtime behavior hints for detector ----
+    outputs_prob: bool = True          # finetuned detector 应输出概率
+    disable_calibration: bool = True   # 禁止 runner.Calibrate/Platt 这类学习型校准（语义开关）
+    force_runner_calibration: bool = False  # 禁止 evaluate() 的 inline IRLS 拟合
+    auto_calibrate: bool = False            # 禁止自动找 calibrator json`
     # ========= 新增：LoRA 相关配置（默认不启用） =========
     use_lora: bool = False
     lora_r: int = 8
@@ -270,7 +274,7 @@ def _train_seqcls_impl(
     sample_k: Optional[int] = None,
     train_ratio: float = 8.0,
     val_ratio: float = 1.0,
-    test_ratio: float = 1.0,
+    test_ratio: float = 0.0,
     output_dir: Optional[str] = None,
     max_length: int = 512,
     lr: float = 5e-5,
@@ -285,7 +289,7 @@ def _train_seqcls_impl(
     seed: int = 114514,
     device: Optional[str] = None,
     name: Optional[str] = None,
-
+    outputs_prob: bool = True,
     # ========= 新增：LoRA 透传参数（与 TrainCfg 同名） =========
     use_lora: bool = False,
     lora_r: int = 8,
@@ -299,6 +303,8 @@ def _train_seqcls_impl(
     lora_save_adapter_copy: bool = True,
 ) -> Dict[str, Any]:
     _seed_everything(seed)
+    torch.set_grad_enabled(True)
+
     # 1) load data
     if not dataset:
         examples, _ = load_dataset_unified(dataset="hc3", sample_k=5000, sample_seed=seed, group_cols=None)
@@ -322,7 +328,7 @@ def _train_seqcls_impl(
         fp16=fp16, label_smoothing=label_smoothing, seed=seed, device=device, name=name,
         use_lora=use_lora, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
         lora_bias=lora_bias, lora_target_modules=lora_target_modules, lora_task_type=lora_task_type,
-        lora_merge_on_save=lora_merge_on_save, lora_export_tag=lora_export_tag,
+        lora_merge_on_save=lora_merge_on_save, lora_export_tag=lora_export_tag, outputs_prob=outputs_prob,
         lora_save_adapter_copy=lora_save_adapter_copy,
     )
 
@@ -384,6 +390,10 @@ _ALLOWED_KEYS = {
     "use_lora", "lora_r", "lora_alpha", "lora_dropout", "lora_bias",
     "lora_target_modules", "lora_task_type",
     "lora_merge_on_save", "lora_export_tag", "lora_save_adapter_copy",
+    "outputs_prob",
+    "disable_calibration",
+    "force_runner_calibration",
+    "auto_calibrate",
 }
 
 def _clean_kwargs(kwargs: dict) -> dict:

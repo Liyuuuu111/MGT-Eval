@@ -78,6 +78,200 @@ def _pr_auc_from_probs(y: np.ndarray, p: np.ndarray) -> float:
         prev_r, prev_prec = r, prec
     return float(aupr)
 
+def _scan_tpr_at_fpr(
+    y: np.ndarray,
+    p: np.ndarray,
+    fpr_levels: List[float],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    对校准后的概率 p 扫描阈值，得到在 FPR < target 时 TPR 最大的阈值。
+    这里 FPR / TPR 的定义与二分类常规定义一致。
+    返回结构：
+    {
+      "1":   {"threshold": float or None, "tpr": float or None, "fpr": float or None},
+      "0.1": {...},
+      ...
+    }
+    """
+    y = np.asarray(y).astype(int).reshape(-1)
+    p = np.asarray(p).astype(float).reshape(-1)
+    assert y.shape[0] == p.shape[0]
+    P = int(np.sum(y == 1))
+    N = int(np.sum(y == 0))
+
+    res: Dict[str, Dict[str, Optional[float]]] = {}
+    # 没有正样本或负样本时无法定义 TPR / FPR
+    if P == 0 or N == 0:
+        for lvl in fpr_levels:
+            res[f"{lvl:g}"] = {"threshold": None, "tpr": None, "fpr": None}
+        return res
+
+    order = np.argsort(-p)
+    p_sorted = p[order]
+    y_sorted = y[order]
+
+    cum_tp = 0
+    cum_fp = 0
+
+    # 为每个 FPR 水平记录当前最优 (TPR 最大、满足 FPR <= level) 的点
+    best: Dict[float, Dict[str, Optional[float]]] = {
+        float(lvl): {"tpr": -1.0, "fpr": None, "thr": None} for lvl in fpr_levels
+    }
+
+    for i in range(len(p_sorted)):
+        if y_sorted[i] == 1:
+            cum_tp += 1
+        else:
+            cum_fp += 1
+
+        # 同一 score 块只在最后一个样本处更新（因为阈值无法区分块内样本）
+        if i + 1 < len(p_sorted) and p_sorted[i + 1] == p_sorted[i]:
+            continue
+
+        thr = p_sorted[i]
+        tpr = cum_tp / P
+        fpr = cum_fp / N
+
+        for lvl, rec in best.items():
+            # 这里采用 FPR <= lvl + 1e-12，数值上等价于“FPR 小于等于该值”
+            if fpr <= lvl + 1e-12 and tpr > (rec["tpr"] if rec["tpr"] is not None else -1.0):
+                rec["tpr"] = tpr
+                rec["fpr"] = fpr
+                rec["thr"] = thr
+
+    for lvl, rec in best.items():
+        key = f"{lvl:g}"
+        if rec["tpr"] is None or rec["tpr"] < 0:
+            res[key] = {"threshold": None, "tpr": None, "fpr": None}
+        else:
+            res[key] = {
+                "threshold": float(rec["thr"]),
+                "tpr": float(rec["tpr"]),
+                "fpr": float(rec["fpr"]),
+            }
+    return res
+
+# ============== NEW: 通用阈值搜索（acc / f1 / tpr@0.01） ==============
+def _select_decision_threshold(
+    y: np.ndarray,
+    p: np.ndarray,
+    mode: str,
+    tpr_at_fpr: Optional[Dict[str, Dict[str, Optional[float]]]] = None,
+) -> Dict[str, Any]:
+    """
+    根据 mode 选择决策阈值：
+      - mode == "acc":  在所有阈值上搜索，选择 accuracy 最大的阈值；
+      - mode == "f1":   在所有阈值上搜索，选择 F1 最大的阈值；
+      - mode == "tpr":  使用 TPR@FPR<=0.01 扫描得到的最佳点（若存在）。
+    返回结构（JSON 可序列化）：
+      {
+        "mode": "acc" / "f1" / "tpr",
+        "threshold": float or None,
+        "metric_value": float or None,   # 对应优化目标上的取值（acc 或 f1 或 TPR）
+        "metrics": {...} or None,        # 在该阈值下完整的指标（_confusion_and_basic_metrics）
+        # 仅 mode == "tpr" 时额外包含：
+        "target_fpr": 0.01,
+        "operating_point": { "threshold": ..., "tpr": ..., "fpr": ... } or None
+      }
+    """
+    mode = str(mode).lower().strip()
+    y = np.asarray(y).astype(int).reshape(-1)
+    p = np.asarray(p).astype(float).reshape(-1)
+    n = y.shape[0]
+
+    if n == 0:
+        return {
+            "mode": mode,
+            "threshold": None,
+            "metric_value": None,
+            "metrics": None,
+        }
+
+    if mode not in {"acc", "f1", "tpr"}:
+        raise ValueError(f"Unknown threshold search mode: {mode} (expected one of: acc, f1, tpr)")
+
+    # --- 模式 3：TPR@FPR<=0.01，直接复用 _scan_tpr_at_fpr 的结果 ---
+    if mode == "tpr":
+        op = (tpr_at_fpr or {}).get("0.01")
+        if op is None or op.get("threshold") is None:
+            return {
+                "mode": mode,
+                "threshold": None,
+                "metric_value": None,
+                "metrics": None,
+                "target_fpr": 0.01,
+                "operating_point": op,
+            }
+        thr = float(op["threshold"])
+        metrics = _confusion_and_basic_metrics(y, p, thr=thr)
+        # 这里的 metric_value 直接取 TPR（即 op["tpr"]）
+        return {
+            "mode": mode,
+            "threshold": thr,
+            "metric_value": float(op.get("tpr", 0.0)) if op.get("tpr") is not None else None,
+            "metrics": metrics,
+            "target_fpr": 0.01,
+            "operating_point": op,
+        }
+
+    # --- 模式 1 / 2：在所有阈值上扫描 acc / f1 ---
+    # 按概率从大到小排序，阈值从 high -> low 依次移动
+    order = np.argsort(-p)
+    ps = p[order]
+    ys = y[order]
+
+    P = int(np.sum(ys == 1))
+    N = n - P
+    # 对于 acc 和 f1，即使 P=0 或 N=0 也仍然可以定义（只是 F1 会退化）
+    tp = fp = 0
+    fn = P
+    tn = N
+
+    best_thr: Optional[float] = None
+    best_val: float = -1.0
+
+    for i in range(n):
+        if ys[i] == 1:
+            tp += 1
+            fn -= 1
+        else:
+            fp += 1
+            tn -= 1
+
+        # 同一 score 块只在最后一个样本处评估一次
+        if i + 1 < n and ps[i + 1] == ps[i]:
+            continue
+
+        if mode == "acc":
+            val = (tp + tn) / (P + N) if (P + N) > 0 else 0.0
+        else:  # mode == "f1"
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            if (prec + rec) > 0:
+                val = 2.0 * prec * rec / (prec + rec)
+            else:
+                val = 0.0
+
+        if val > best_val + 1e-12:
+            best_val = val
+            best_thr = float(ps[i])
+
+    if best_thr is None:
+        return {
+            "mode": mode,
+            "threshold": None,
+            "metric_value": None,
+            "metrics": None,
+        }
+
+    metrics = _confusion_and_basic_metrics(y, p, thr=best_thr)
+    return {
+        "mode": mode,
+        "threshold": best_thr,
+        "metric_value": float(best_val),
+        "metrics": metrics,
+    }
+
 # ============== IRLS（Platt & 多特征 LR） ==============
 def _sigmoid(z: np.ndarray) -> np.ndarray:
     z = np.clip(z, -80.0, 80.0)
@@ -273,14 +467,20 @@ def _build_detector(
     import inspect
     sig = inspect.signature(Det.__init__)
     params = sig.parameters
-
+    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    def _accepts(key: str) -> bool:
+        return has_varkw or (key in params)
     raw_kwargs = dict(detector_kwargs or {})
-    kwargs = {k: v for k, v in raw_kwargs.items() if k in params}
+    kwargs = dict(raw_kwargs) if has_varkw else {k: v for k, v in raw_kwargs.items() if k in params}
 
     def _set_if_absent(key, value):
-        if key in params and key not in kwargs and value is not None:
+       if _accepts(key) and key not in kwargs and value is not None:
             kwargs[key] = value
-
+    # 通用校准开关（允许从 runner 侧强制关闭校准）
+    _set_if_absent("outputs_prob", raw_kwargs.get("outputs_prob", None))
+    _set_if_absent("disable_calibration", raw_kwargs.get("disable_calibration", None))
+    _set_if_absent("auto_calibrate", raw_kwargs.get("auto_calibrate", None))
+    _set_if_absent("force_runner_calibration", raw_kwargs.get("force_runner_calibration", None))
     _set_if_absent("device", device)
     for k in ("use_bfloat16", "bf16", "use_bf16"):
         _set_if_absent(k, bool(use_bfloat16) if k in params else None)
@@ -300,9 +500,9 @@ def _build_detector(
     #    —— 只有当这些键确实出现在 __init__ 签名里时才会注入
     #    —— 未给 model2 时，sampling 默认回落到 model1
     # --------------------------------------------------------
-    if ("score_model" in params) or ("scoring_name" in params) or ("fdg_scoring_model" in params):
+    if ("score_model" in params) or ("scoring_name" in params) or ("scoring_model_name" in params):
         _set_if_absent("score_model", model1 if "score_model" in params else None)
-        _set_if_absent("scoring_name",       model1 if "scoring_name" in params else None)
+        _set_if_absent("scoring_model_name", model1 if "scoring_model_name" in params else None)
         _set_if_absent("fdg_scoring_model",  model1 if "fdg_scoring_model" in params else None)
 
         _set_if_absent("sampling_model_name", model2 or model1 if "sampling_model_name" in params else None)
@@ -318,8 +518,10 @@ def _build_detector(
     elif "model" in params:
         _set_if_absent("model", model1)
         _set_if_absent("tokenizer", model1 if "tokenizer" in params else None)
-    elif "base_name_or_path" in params:
-        _set_if_absent("base_name_or_path", model1)
+    elif "observer" in params:
+        _set_if_absent("observer", model1)
+    elif "observer_model" in params:
+        _set_if_absent("observer_model", model1)
     elif "base_model_name_or_path" in params:
         _set_if_absent("base_model_name_or_path", model1)
     elif "rewrite_model" in params:
@@ -328,8 +530,6 @@ def _build_detector(
         _set_if_absent("base_model_name", model1)
     elif "base_model_name" in params:
         _set_if_absent("base_model_name", model1)
-    elif "observer" in params:
-        _set_if_absent("observer", model1)
     # —— 若以上都不匹配，就完全依赖 detector_kwargs —— #
 
     # DetectGPT 的 T5（仅当该键确实在签名中）
@@ -338,6 +538,8 @@ def _build_detector(
         _set_if_absent("mask_model", model2)
         _set_if_absent("mask_name_or_path", model2)
         _set_if_absent("performer", model2)
+        _set_if_absent("performer_model", model2)
+
     # TOCSIN 私有参数
     _set_if_absent("basemodel", basemodel)
     if bart_ckpt is not None:
@@ -406,6 +608,8 @@ def Calibrate(
     max_iter: int = 200,
     tol: float = 1e-6,
     standardize: bool = True,
+    # NEW: 阈值搜索模式（acc / f1 / tpr）
+    mode: str = "acc",
     # 输出
     out: Optional[str] = None,
     out_dir: Optional[str] = None,
@@ -424,6 +628,34 @@ def Calibrate(
 
     if bf16:
         print("[Calibrate] Note: BF16 enabled for detector scoring; ensure this matches your evaluation setting.")
+    # --- NEW: 对已经输出概率的检测器禁用校准拟合 ---
+    det_type = (getattr(det, "detector_type", "") or "").strip().lower()
+    if getattr(det, "outputs_prob", False) or getattr(det, "disable_calibration", False):
+        print(f"[Calibrate] Detector '{getattr(det, 'DETECTOR_NAME', detector)}' outputs probability; "
+            f"skip calibration fitting and save identity calibrator.")
+
+        out_path = out or _auto_out_path(detector, model1, data, out_dir)
+        payload = {
+            "calibrator": {
+                "name": "none",
+                "standardize": False,
+                "decision_mode": "fixed",
+                "decision_threshold": 0.5,
+            },
+            "meta": {
+                "detector": getattr(det, "DETECTOR_NAME", detector),
+                "detector_type": getattr(det, "detector_type", "Unknown"),
+                "dev": None,
+                "models": {"model1": model1, "model2": model2},
+                "dataset": str(data),
+                "fit": {"name": "none"},
+            }
+        }
+        Path(os.path.dirname(out_path) or ".").mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"[Calibrate] Calibrator saved to: {out_path}")
+        return {"path": out_path, "params": payload["calibrator"], "meta": payload["meta"]}
 
     # 载入校准数据
     examples, _ = load_dataset_unified(
@@ -492,15 +724,75 @@ def Calibrate(
             params = cal["fit"](scores, labels, cfg)
             probs_dev = np.asarray(cal["apply"](scores, params), dtype=np.float32)
 
-    # dev 上指标（基于概率）
+    # dev 上指标（基于概率，固定 thr=0.5，保证与旧版兼容）
     dev_counts = _confusion_and_basic_metrics(labels, probs_dev, thr=0.5)
     auroc_prob = _roc_auc_from_scores(labels, probs_dev)  # 这里按“概率排序”的 AUROC
     aupr_prob = _pr_auc_from_probs(labels, probs_dev)
 
+    # NEW: 扫描阈值，计算 TPR@FPR=1, 0.1, 0.01, 0.05（满足 FPR <= 目标时 TPR 最大的阈值）
+    fpr_levels = [0.05, 0.01, 0.001, 0.0001]
+    tpr_at_fpr = _scan_tpr_at_fpr(labels, probs_dev, fpr_levels=fpr_levels)
+
+    # 控制台打印一眼可见（TPR@FPR）
+    print("[Calibrate] Best thresholds for TPR@FPR:")
+    for lvl in sorted(tpr_at_fpr.keys(), key=lambda x: float(x)):
+        info = tpr_at_fpr[lvl]
+        thr = info["threshold"]
+        if thr is None:
+            print(f"  FPR<{lvl}: no valid threshold (check label distribution).")
+        else:
+            print(f"  FPR<{lvl}: thr={thr:.6f}, TPR={info['tpr']:.4f}, FPR={info['fpr']:.4f}")
+
+    # NEW: 三种模式的决策阈值搜索
+    mode_eff = str(mode).lower().strip()
+    if mode_eff not in {"acc", "f1", "tpr"}:
+        raise ValueError(f"Unknown threshold search mode: {mode} (expected one of: acc, f1, tpr).")
+
+    selected_threshold = _select_decision_threshold(
+        labels,
+        probs_dev,
+        mode=mode_eff,
+        tpr_at_fpr=tpr_at_fpr,
+    )
+
+    print(f"[Calibrate] Decision threshold search (mode={mode_eff}):")
+    if selected_threshold["threshold"] is None:
+        print("  No valid decision threshold found for the requested mode; "
+              "dev metrics above still use thr=0.5.")
+    else:
+        m = selected_threshold["metrics"]
+        print(
+            "  thr={thr:.6f}, acc={acc:.4f}, f1={f1:.4f}, "
+            "precision={prec:.4f}, recall={rec:.4f}".format(
+                thr=selected_threshold["threshold"],
+                acc=m["acc"],
+                f1=m["f1"],
+                prec=m["precision"],
+                rec=m["recall"],
+            )
+        )
+        if mode_eff == "tpr":
+            op = selected_threshold.get("operating_point")
+            if op is not None and op.get("threshold") is not None:
+                print(
+                    f"  (TPR@FPR<=0.01 operating point: "
+                    f"TPR={op['tpr']:.4f}, FPR={op['fpr']:.4f})"
+                )
+
     # 持久化
     out_path = out or _auto_out_path(detector, model1, data, out_dir)
     payload = {
-        "calibrator": {**params, "name": eff_name},
+        "calibrator": {
+            **params,
+            "name": eff_name,
+            # NEW: 记录决策阈值及其模式
+            "decision_mode": mode_eff,
+            "decision_threshold": (
+                float(selected_threshold["threshold"])
+                if selected_threshold.get("threshold") is not None
+                else None
+            ),
+        },
         "meta": {
             "detector": getattr(det, "DETECTOR_NAME", detector),
             "detector_type": getattr(det, "detector_type", "Unknown"),
@@ -514,6 +806,9 @@ def Calibrate(
                     "aupr": float(aupr_prob),
                 },
                 "feature_dim": (int(scores.shape[1]) if scores.ndim == 2 else 1),
+                "tpr_at_fpr": tpr_at_fpr,            # NEW: 阈值扫描结果（原有）
+                "threshold_mode": mode_eff,          # NEW: 决策阈值搜索模式
+                "selected_threshold": selected_threshold,  # NEW: 最终选择的阈值及指标
             },
             "models": {"model1": model1, "model2": model2},
             "dataset": str(data),
@@ -529,7 +824,7 @@ def Calibrate(
     Path(os.path.dirname(out_path) or ".").mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"[Calibrate] Calibrator saved to: {out_path}")  # ← 新增一行
+    print(f"[Calibrate] Calibrator saved to: {out_path}")
 
     return {
         "path": out_path,

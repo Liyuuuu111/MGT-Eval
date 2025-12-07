@@ -46,6 +46,10 @@ except Exception:
     pass
 
 try:
+    from .metric.dnadetectllm import *  # noqa: F401,F403
+except Exception:
+    pass
+try:
     from .metric.lastde import *  # noqa: F401,F403
 except Exception:
     pass
@@ -110,7 +114,10 @@ try:
 except Exception:
     pass
 
-
+try:
+    from .finetuned.detective import *  # noqa: F401,F403
+except Exception:
+    pass
 def _camel_to_snake(name: str) -> str:
     # Step1: FooBAR -> Foo_BAR
     s1 = re.sub(r'(.)([A-Z][a-z0-9]+)', r'\1_\2', name)

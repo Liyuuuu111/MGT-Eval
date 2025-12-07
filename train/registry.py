@@ -19,6 +19,16 @@ def register_train(*names: str):
         return fn
     return _decorator
 
+def get_trainer(name: str) -> Callable[..., Dict[str, Any]]:
+    fn = get_train_fn(name)
+    if fn is None:
+        available = ", ".join(sorted(_TRAIN_REGISTRY.keys())) or "N/A"
+        raise KeyError(
+            f"[MGTEval][train] No trainer registered for '{name}'. "
+            f"Available: {available}"
+        )
+    return fn
+
 def get_train_fn(name: str) -> Optional[Callable[..., Dict[str, Any]]]:
     return _TRAIN_REGISTRY.get((name or "").lower(), None)
 
@@ -63,9 +73,15 @@ def model_train_and_eval(model: str, **kwargs) -> Dict[str, Any]:
     eval_group_cols = kwargs.pop("eval_group_cols", None)
     max_length = kwargs.get("max_length", 512)
 
-    model_dir = train_out["model_dir"]
-    # 允许直接用训练产出的测试集进行评测（若实现返回了 test 列表）
-    dataset_for_eval = train_out.get("test_examples", None) or eval_dataset
+    # 兼容两种返回形式：
+    if "model_dir" in train_out:
+        model_dir = train_out["model_dir"]
+    elif "train" in train_out and isinstance(train_out["train"], dict) and "model_dir" in train_out["train"]:
+        model_dir = train_out["train"]["model_dir"]
+    else:
+        raise KeyError("train_out 中找不到 model_dir（既没有顶层 model_dir，也没有 train['model_dir']）")
+
+    dataset_for_eval = train_out.get("test_examples", None) or eval_dataset    # 允许直接用训练产出的测试集进行评测（若实现返回了 test 列表）
 
     _ = evaluate_detector(
         detector=detector_name,
@@ -80,12 +96,7 @@ def model_train_and_eval(model: str, **kwargs) -> Dict[str, Any]:
         group_cols=eval_group_cols,
         name=kwargs.get("name", None),
     )
-    return {"train": train_out, "eval": {"out_dir": eval_out_dir, "detector": detector_name}}
-
-# ---------- auto import train implementations so that @register_train runs ----------
-try:
-    # 确保执行 finetuned.finetuned 中的注册副作用
-    from mgt_eval.detectors.finetuned import finetuned as _auto_import_finetuned  # noqa: F401
-except Exception:
-    # 可按需打印日志；这里静默
-    pass
+    return {
+        "train": train_out,
+        "eval": {"out_dir": eval_out_dir, "detector": detector_name}
+    }

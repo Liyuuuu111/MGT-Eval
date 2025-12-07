@@ -1,6 +1,7 @@
+# mgt_eval/data_utils/load.py
 from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
-import os, json, glob, re
+import os, json, glob, re, csv
 import numpy as np
 
 HF_HC3 = "Hello-SimpleAI/HC3"
@@ -29,19 +30,59 @@ def _read_json(path: str) -> List[Dict[str, Any]]:
         return [obj]
     return []
 
+def _read_csv(path: str) -> List[Dict[str, Any]]:
+    """
+    读取带表头的CSV并转成记录列表(dict)。特别兼容以下列名：
+      - 文本列：优先 text；否则回退到 answer / generation / content / article / body
+      - 标签列：label（数值0/1，或字符串 '0'/'1'/'human'/'machine'/... 均可）
+      - 源列：source 或 src
+      - 其他列（如 id / question 等）原样保留
+    """
+    out: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        lower_to_orig = {name.lower(): name for name in (reader.fieldnames or [])}
+
+        def get_col(*cands: str) -> Optional[str]:
+            for c in cands:
+                if c in lower_to_orig:
+                    return lower_to_orig[c]
+            return None
+
+        col_text = get_col("text") or get_col("answer", "generation", "content", "article", "body")
+        col_label = get_col("label")
+        col_source = get_col("source") or get_col("src")
+
+        for row in reader:
+            rec: Dict[str, Any] = dict(row)
+            txt = rec.get(col_text) if col_text else None
+            if txt is None or str(txt).strip() == "":
+                continue
+            if col_label is None or rec.get(col_label) is None or str(rec.get(col_label)).strip() == "":
+                continue
+
+            rec["text"] = str(txt)
+            rec["label"] = rec[col_label]
+            if col_source is not None:
+                rec["source"] = rec.get(col_source)
+            out.append(rec)
+    return out
+
 def _list_json_files(path: str) -> List[str]:
+    """
+    递归列出数据文件；支持 .jsonl/.json/.csv
+    """
+    patterns = ["*.jsonl", "*.json", "*.csv"]
+    files: List[str] = []
     if os.path.isdir(path):
-        files = glob.glob(os.path.join(path, "**", "*.jsonl"), recursive=True)
-        files += glob.glob(os.path.join(path, "**", "*.json"), recursive=True)
+        for pat in patterns:
+            files += glob.glob(os.path.join(path, "**", pat), recursive=True)
         return files
-    if os.path.isfile(path) and (path.endswith(".jsonl") or path.endswith(".json")):
+    if os.path.isfile(path) and any(path.endswith(ext) for ext in [".jsonl", ".json", ".csv"]):
         return [path]
     return []
 
 def _maybe_sample_exact(items: List[Any], k: Optional[int], seed: int = 114514) -> List[Any]:
-    """
-    从 items 中“样本级”精确抽取 k 条（k < len(items) 时），不放回；否则返回原列表。
-    """
     if not items or k is None or k <= 0:
         return items
     n = len(items)
@@ -52,19 +93,45 @@ def _maybe_sample_exact(items: List[Any], k: Optional[int], seed: int = 114514) 
     return [items[int(i)] for i in idx.tolist()]
 
 # ---------------------------
-# 通用规范化：text/label + 保留其余字段（用于分组）
+# 统一规范化：text/label + 保留其余字段
 # ---------------------------
 def _norm_text_label(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(rec, dict):
         return None
-    if "text" not in rec or "label" not in rec:
+
+    text = rec.get("text", None)
+    if text is None:
+        text = rec.get("article", None)  # CoCo
+    if text is None:
         return None
+
+    raw_label = rec.get("label", None)
+    if raw_label is None:
+        return None
+
+    def _to_label(val) -> Optional[int]:
+        if isinstance(val, (int, np.integer)):
+            iv = int(val)
+            if iv in (0, 1):
+                return iv
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("0", "1"):
+                return int(s)
+            if s in ("human", "hum", "real", "reference", "gold", "ref"):
+                return 0
+            if s in ("machine", "ai", "model", "generated", "gen", "chatgpt", "gpt", "bot", "fake"):
+                return 1
+        if isinstance(val, bool):
+            return 1 if val else 0
+        return None
+
+    y = _to_label(raw_label)
+    if y is None:
+        return None
+
     try:
-        return {
-            **rec,
-            "text": str(rec["text"]),
-            "label": int(rec["label"]),
-        }
+        return {**rec, "text": str(text), "label": int(y)}
     except Exception:
         return None
 
@@ -74,41 +141,60 @@ def _norm_text_label(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def _flatten_original_sample_record(rec: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """
     展开形如:
-      {"original": [...], "sample": [...], "sampled": [...], <其他上下文字段...>}
-    为标准样本 [{text, label, split, ...}]：
-      - original → label = 0, split = "original"
-      - sample   → label = 1, split = "sample"
-      - sampled  → label = 1, split = "sampled"
-    任一字段不存在时可省略。
+      {"original": [...], "sample": [...], "sampled": [...], "rewritten": [...], <上下文...>}
+    为样本 [{text, label, split, ...}]：
+      - original  → label = 0, split = "original"
+      - sample    → label = 1, split = "sample"
+      - sampled   → label = 1, split = "sampled"
+      - rewritten → label = 1, split = "rewritten"
+
+    兼容 list 元素为：
+      - str
+      - {"text": "...", "id": "...", ...}  （会保留 id 及其余字段）
     """
-    if not isinstance(rec, dict) or (("original" not in rec) and ("sample" not in rec) and ("sampled" not in rec)):
+    if not isinstance(rec, dict):
         return None
 
-    def _to_text_list(lst: Any) -> List[str]:
-        out: List[str] = []
+    has_original = "original" in rec
+    has_any_machine = any(k in rec for k in ("sample", "sampled", "rewritten"))
+    if not (has_original or has_any_machine):
+        return None
+
+    def _to_item_list(lst: Any) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
         if isinstance(lst, (list, tuple)):
             for x in lst:
-                if isinstance(x, dict) and "text" in x:
-                    t = str(x.get("text", "")).strip()
+                if isinstance(x, dict):
+                    # 最低要求：必须能拿到 text
+                    if "text" in x and isinstance(x["text"], str):
+                        t = x["text"].strip()
+                        if not t:
+                            continue
+                        # 保留除 label/split 之外所有字段（防止污染我们后续写入的 label/split）
+                        item = {k: v for k, v in x.items() if k not in ("label", "split")}
+                        item["text"] = t
+                        out.append(item)
+                    else:
+                        # dict 但没有 text，就忽略
+                        continue
                 else:
                     t = str(x).strip()
-                if t:
-                    out.append(t)
+                    if t:
+                        out.append({"text": t})
         return out
 
-    ctx = {k: v for k, v in rec.items() if k not in ("original", "sample", "sampled")}
+    ctx = {k: v for k, v in rec.items() if k not in ("original", "sample", "sampled", "rewritten")}
 
-    ori = _to_text_list(rec.get("original", []))
-    sam_sample  = _to_text_list(rec.get("sample", []))
-    sam_sampled = _to_text_list(rec.get("sampled", []))
+    ori_items = _to_item_list(rec.get("original", []))
+    sam_items = _to_item_list(rec.get("sample", []))
+    sampled_items = _to_item_list(rec.get("sampled", []))
+    rewrite_items = _to_item_list(rec.get("rewritten", []))
 
     out: List[Dict[str, Any]] = []
-    out += [{**ctx, "text": t, "label": 0, "split": "original"} for t in ori]
-
-    # 逐源展开，split 保留其来源，均视作机器（label=1）
-    out += [{**ctx, "text": t, "label": 1, "split": "sample"}  for t in sam_sample]
-    out += [{**ctx, "text": t, "label": 1, "split": "sampled"} for t in sam_sampled]
-
+    out += [{**ctx, **it, "label": 0, "split": "original"} for it in ori_items]
+    out += [{**ctx, **it, "label": 1, "split": "sample"} for it in sam_items]
+    out += [{**ctx, **it, "label": 1, "split": "sampled"} for it in sampled_items]
+    out += [{**ctx, **it, "label": 1, "split": "rewritten"} for it in rewrite_items]
     return out
 
 # ---------------------------
@@ -124,10 +210,6 @@ def _flatten_hc3_record(
     pair_mode: str = "balance_min",
     rng: Optional[np.random.RandomState] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    将单条 HC3 记录展开为若干 {text,label}：
-      - balance_min：取 k = min(#human, #machine)，输出 2k 条（各 k 条）
-    """
     out: List[Dict[str, Any]] = []
     human = [s.strip() for s in rec.get("human_answers", []) if isinstance(s, str) and s.strip()]
     machine = [s.strip() for s in rec.get("chatgpt_answers", []) if isinstance(s, str) and s.strip()]
@@ -146,7 +228,6 @@ def _flatten_hc3_record(
         out.append({"text": machine[rng.randint(len(machine))], "label": 1, "source": source})
         return out
 
-    # balance_min
     k = min(len(human), len(machine))
     h_idx = rng.choice(len(human), size=k, replace=False)
     m_idx = rng.choice(len(machine), size=k, replace=False)
@@ -155,22 +236,17 @@ def _flatten_hc3_record(
     return out
 
 def _load_hc3_all_from_hf() -> List[Dict[str, Any]]:
-    """
-    从 HF 读取 HC3 全量（不在本函数内抽样），再逐条记录展开为样本。
-    """
     try:
         from datasets import load_dataset
     except Exception as e:
         raise RuntimeError("需要安装 datasets 才能从 HF 加载 HC3：pip install datasets") from e
     raw = load_dataset(HF_HC3, "all")
-    # 聚合记录
     records: List[Dict[str, Any]] = []
     if hasattr(raw, "keys"):
         for sp in raw.keys():
             records.extend(list(raw[sp]))
     else:
         records.extend(list(raw))
-    # 展开为样本
     rng = np.random.RandomState(114514)
     exs: List[Dict[str, Any]] = []
     for rec in records:
@@ -178,26 +254,27 @@ def _load_hc3_all_from_hf() -> List[Dict[str, Any]]:
     return exs
 
 def _load_hc3_all_from_local(path: str) -> List[Dict[str, Any]]:
-    """
-    从本地 JSON/JSONL 读取 HC3 全量（不在本函数内抽样），再逐条记录展开为样本。
-    同时兼容已是标准 text/label 的数据。
-    """
     files = _list_json_files(path)
     if not files:
         raise FileNotFoundError(f"未在路径中找到 HC3 文件：{path}")
 
-    # 读为记录列表
     records: List[Dict[str, Any]] = []
     for p in files:
         try:
-            recs = _read_jsonl(p) if p.endswith(".jsonl") else _read_json(p)
+            if p.endswith(".jsonl"):
+                recs = _read_jsonl(p)
+            elif p.endswith(".json"):
+                recs = _read_json(p)
+            elif p.endswith(".csv"):
+                recs = _read_csv(p)
+            else:
+                recs = []
         except Exception:
             continue
         records.extend(recs)
     if not records:
         raise ValueError(f"在 {path} 未解析到 HC3 记录")
 
-    # 展开为样本；若已经是标准化数据则直接保留
     rng = np.random.RandomState(114514)
     exs: List[Dict[str, Any]] = []
     for rec in records:
@@ -210,25 +287,19 @@ def _load_hc3_all_from_local(path: str) -> List[Dict[str, Any]]:
     return exs
 
 # ---------------------------
-# 抽样辅助：HC3 场景下“按类别均衡”抽样
+# 抽样辅助：HC3 均衡抽样
 # ---------------------------
 def _balanced_sample_two_class(examples: List[Dict[str, Any]],
                                k_per_class: int,
                                seed: int = 114514) -> List[Dict[str, Any]]:
-    """
-    在二分类（0/1）样本上进行“每类恰好 k_per_class 条”的均衡抽样（不放回）。
-    如果某类不足，则取 min(可用数) 达到对称上限，返回 2 * k_final 条。
-    """
     if not examples or k_per_class is None or k_per_class <= 0:
         return examples
 
-    # 分桶
     cls0 = [ex for ex in examples if int(ex.get("label", 0)) == 0]
     cls1 = [ex for ex in examples if int(ex.get("label", 0)) == 1]
 
     n0, n1 = len(cls0), len(cls1)
     if n0 == 0 or n1 == 0:
-        # 无法均衡，直接返回原样本
         return _maybe_sample_exact(examples, 2 * k_per_class, seed=114514)
 
     k = min(k_per_class, n0, n1)
@@ -238,27 +309,25 @@ def _balanced_sample_two_class(examples: List[Dict[str, Any]],
     sub0 = [cls0[int(i)] for i in idx0.tolist()]
     sub1 = [cls1[int(i)] for i in idx1.tolist()]
     merged = sub0 + sub1
-
-    # 打乱合并的样本，保持随机性
     if merged:
         perm = rng.permutation(len(merged))
         merged = [merged[int(i)] for i in perm.tolist()]
     return merged
 
 # ---------------------------
-# 通用加载入口
+# 自动分组列探测
 # ---------------------------
-_DEFAULT_GROUP_CANDIDATES = ["lang", "source", "model", "sub_source", "split"]
+_DEFAULT_GROUP_CANDIDATES = ["id", "qid", "question_id", "question",
+                             "lang", "source", "model", "sub_source", "split"]
 
 def _auto_group_cols(examples: List[Dict[str, Any]],
                      candidates: Sequence[str] = _DEFAULT_GROUP_CANDIDATES) -> List[str]:
-    """从候选集合中，挑出在数据中“存在且非空”的列名。"""
     chosen: List[str] = []
     if not examples:
         return chosen
     for col in candidates:
         exists = False
-        for ex in examples[:512]:  # 采样一部分做探测
+        for ex in examples[:512]:
             v = ex.get(col, None)
             if v is not None and str(v).strip() != "":
                 exists = True
@@ -267,6 +336,18 @@ def _auto_group_cols(examples: List[Dict[str, Any]],
             chosen.append(col)
     return chosen
 
+# ---------------------------
+# 解析逗号分隔的数据集规格
+# ---------------------------
+def _split_dataset_specs(spec: str) -> List[str]:
+    if not isinstance(spec, str):
+        return []
+    parts = [p.strip() for p in spec.split(",")]
+    return [p for p in parts if p]
+
+# ---------------------------
+# 通用加载入口（单条样本）
+# ---------------------------
 def load_dataset_unified(
     dataset: Union[str, Iterable[Dict[str, Any]]],
     sample_k: Optional[int] = None,
@@ -274,72 +355,202 @@ def load_dataset_unified(
     group_cols: Optional[Sequence[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
-    统一数据集加载：
-      - 若 dataset 为 str：
-          * 包含 'hc3'：无论本地/HF，均先“全量读取 + 展开为样本”，
-            然后若设置 sample_k，则进行“每类各 sample_k 条”的均衡抽样（总计 2*sample_k）
-          * 其他：当作标准 JSON/JSONL（目录或文件），样本级抽样，目标精确 sample_k 条
-      - 若 dataset 为 Iterable[dict]：标准化 {"text","label"}，样本级抽样，目标精确 sample_k 条
-    返回：
-      * examples: List[dict]（顺序即评测顺序）
-      * group_cols: 实际用于分组统计的列名（若未显式指定则自动探测）
+    统一数据集加载（支持多数据集合并，且对 .csv/.jsonl/.json 一视同仁）：
+      - 支持 HC3；支持 original/sample(s)/rewritten 顶层结构的展开
+      - 返回 examples: [{text,label,...}], 与 group_cols（用于统计/可选配对）
     """
-    # 1) 读取 & 标准化 examples
     examples: List[Dict[str, Any]] = []
-    routed_hc3 = isinstance(dataset, str) and should_route_to_hc3(dataset)
 
     if isinstance(dataset, str):
-        if routed_hc3:
-            # HC3：全量展开为样本
-            if os.path.exists(dataset):
-                examples = _load_hc3_all_from_local(dataset)
+        specs = _split_dataset_specs(dataset)
+        if len(specs) <= 1:
+            routed_hc3 = should_route_to_hc3(dataset)
+            if routed_hc3:
+                if os.path.exists(dataset):
+                    examples = _load_hc3_all_from_local(dataset)
+                else:
+                    examples = _load_hc3_all_from_hf()
             else:
-                examples = _load_hc3_all_from_hf()
+                files = _list_json_files(dataset)
+                if not files:
+                    raise FileNotFoundError(f"未找到 CSV/JSON/JSONL：{dataset}")
+                for p in files:
+                    if p.endswith(".jsonl"):
+                        recs = _read_jsonl(p)
+                    elif p.endswith(".json"):
+                        recs = _read_json(p)
+                    elif p.endswith(".csv"):
+                        recs = _read_csv(p)
+                    else:
+                        recs = []
+                    for r in recs:
+                        exs = _flatten_original_sample_record(r)
+                        if exs:
+                            examples.extend(exs)
+                        else:
+                            nr = _norm_text_label(r)
+                            if nr is not None:
+                                examples.append(nr)
+            only_hc3 = should_route_to_hc3(dataset)
         else:
-            # 标准 JSON/JSONL
-            files = _list_json_files(dataset)
-            if not files:
-                raise FileNotFoundError(f"未找到 JSON/JSONL：{dataset}")
-            for p in files:
-                recs = _read_jsonl(p) if p.endswith(".jsonl") else _read_json(p)
-                for r in recs:
-                    # 先尝试展开 original/sample 顶层 JSON
-                    exs = _flatten_original_sample_record(r)
-                    if exs is not None and len(exs) > 0:
-                        examples.extend(exs)
-                        continue
-                    # 回退为标准 {text,label}
-                    nr = _norm_text_label(r)
-                    if nr is not None:
-                        examples.append(nr)
-
+            all_parts: List[Dict[str, Any]] = []
+            parts_is_hc3: List[bool] = []
+            for spec in specs:
+                is_hc3 = should_route_to_hc3(spec)
+                parts_is_hc3.append(is_hc3)
+                if is_hc3:
+                    if os.path.exists(spec):
+                        part = _load_hc3_all_from_local(spec)
+                    else:
+                        part = _load_hc3_all_from_hf()
+                    all_parts.extend(part)
+                else:
+                    files = _list_json_files(spec)
+                    if not files:
+                        raise FileNotFoundError(f"未找到 CSV/JSON/JSONL：{spec}")
+                    for p in files:
+                        if p.endswith(".jsonl"):
+                            recs = _read_jsonl(p)
+                        elif p.endswith(".json"):
+                            recs = _read_json(p)
+                        elif p.endswith(".csv"):
+                            recs = _read_csv(p)
+                        else:
+                            recs = []
+                        for r in recs:
+                            exs = _flatten_original_sample_record(r)
+                            if exs:
+                                all_parts.extend(exs)
+                            else:
+                                nr = _norm_text_label(r)
+                                if nr is not None:
+                                    all_parts.append(nr)
+            examples = all_parts
+            only_hc3 = (len(parts_is_hc3) > 0 and all(parts_is_hc3))
     else:
-        # Iterable 直接标准化，优先尝试 original/sample 展开
         for r in dataset:
             exs = _flatten_original_sample_record(r)
-            if exs is not None and len(exs) > 0:
+            if exs:
                 examples.extend(exs)
-                continue
-            nr = _norm_text_label(r)
-            if nr is not None:
-                examples.append(nr)
+            else:
+                nr = _norm_text_label(r)
+                if nr is not None:
+                    examples.append(nr)
+        only_hc3 = False
 
     if not examples:
         raise ValueError("未加载到有效样本（需包含 'text' 与 'label'）。")
 
-    # 2) 样本级抽样（修复：HC3 保证目标为 2*sample_k）
     if sample_k is not None and sample_k > 0:
-        if routed_hc3:
-            # 目标：每类各 sample_k 条（总计 2*sample_k）；若不足则取能取到的最大均衡数
+        if only_hc3:
             examples = _balanced_sample_two_class(examples, k_per_class=int(sample_k), seed=sample_seed)
         else:
-            # 标准数据：总数为 sample_k
             examples = _maybe_sample_exact(examples, int(sample_k), seed=sample_seed)
 
-    # 3) 决定 group_cols
     if group_cols is None or len(group_cols) == 0:
         used = _auto_group_cols(examples, _DEFAULT_GROUP_CANDIDATES)
     else:
         used = list(group_cols)
 
     return examples, used
+
+# ---------------------------
+# 新增：成对加载入口（ImBD-SPO 需要）
+# ---------------------------
+def load_dataset_unified_pairs(
+    dataset: Union[str, Iterable[Dict[str, Any]]],
+    sample_k_pairs: Optional[int] = None,
+    sample_seed: int = 114514,
+    pair_by: Optional[str] = None,
+    pubmed_answer_cut: bool = True,
+) -> Tuple[List[Tuple[str, str]], Dict[str, Any]]:
+    """
+    将统一加载的单条样本 [{text,label,...}] 转换为 (human, machine) 成对样本：
+      - 优先使用上下文键配对：'id'/'qid'/'question_id'/'question'（或显式 pair_by）
+      - 若无上述键，则退化到基于组的配对（如 'source'/'lang'），再退化到全局随机配对
+      - 对于包含 'pubmed' 的数据集规格，且 pubmed_answer_cut=True，则对文本做 'Answer:' 截断
+
+    返回：
+      pairs: List[Tuple[str, str]]  # (original/human, rewritten/machine)
+      stats: Dict  # 包含分组/配对统计信息
+    """
+    # 先加载“单条样本”，不要在这里 sample，避免破坏配对
+    examples, group_cols = load_dataset_unified(dataset, sample_k=None, sample_seed=sample_seed)
+
+    # 可选的 PubMed 'Answer:' 截断（按数据集路径字符串判断）
+    def _maybe_cut_answer(txt: str) -> str:
+        if not isinstance(txt, str):
+            return txt
+        parts = txt.split("Answer:")
+        if len(parts) >= 2:
+            return parts[1].strip()
+        return txt
+
+    is_pubmed_like = False
+    if isinstance(dataset, str):
+        for spec in _split_dataset_specs(dataset):
+            if re.search(r"pubmed", spec, flags=re.IGNORECASE):
+                is_pubmed_like = True
+                break
+
+    if is_pubmed_like and pubmed_answer_cut:
+        for ex in examples:
+            ex["text"] = _maybe_cut_answer(ex["text"])
+
+    # 分组策略：优先 id/qid/question_id/question；否则 source/lang；否则 None（全局）
+    priority_keys = ["id", "qid", "question_id", "question", "source", "lang"]
+    if pair_by:
+        # 显式指定优先（允许传入任意存在字段）
+        priority_keys = [pair_by] + [k for k in priority_keys if k != pair_by]
+
+    # 计算每条样本的“分组键”
+    def _key_for(ex: Dict[str, Any]) -> Optional[str]:
+        for k in priority_keys:
+            if k in ex and ex[k] is not None and str(ex[k]).strip() != "":
+                return f"{k}:{str(ex[k])}"
+        return None  # 无上下文 → 进入“全局配对池”
+
+    buckets: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for ex in examples:
+        buckets.setdefault(_key_for(ex), []).append(ex)
+
+    # 在每个桶内做配对：human(0) vs machine(1) 逐一配对
+    rng = np.random.RandomState(sample_seed)
+    pairs: List[Tuple[str, str]] = []
+    per_bucket_stats: Dict[str, Dict[str, int]] = {}
+
+    for k, items in buckets.items():
+        human = [it for it in items if int(it.get("label", 0)) == 0 and isinstance(it.get("text", None), str)]
+        mach  = [it for it in items if int(it.get("label", 0)) == 1 and isinstance(it.get("text", None), str)]
+        if not human or not mach:
+            continue
+        rng.shuffle(human)
+        rng.shuffle(mach)
+        m = min(len(human), len(mach))
+        for i in range(m):
+            pairs.append((human[i]["text"].strip(), mach[i]["text"].strip()))
+        per_bucket_stats[str(k)] = {"human": len(human), "machine": len(mach), "paired": m}
+
+    # 如果没有任何按桶配对成功，退化到全局配对
+    if not pairs:
+        human = [it for it in examples if int(it.get("label", 0)) == 0 and isinstance(it.get("text", None), str)]
+        mach  = [it for it in examples if int(it.get("label", 0)) == 1 and isinstance(it.get("text", None), str)]
+        rng.shuffle(human)
+        rng.shuffle(mach)
+        m = min(len(human), len(mach))
+        pairs = [(human[i]["text"].strip(), mach[i]["text"].strip()) for i in range(m)]
+        per_bucket_stats["__global__"] = {"human": len(human), "machine": len(mach), "paired": m}
+
+    # 可选：对配对结果整体再抽样（对“对数”）
+    if sample_k_pairs is not None and sample_k_pairs > 0:
+        pairs = _maybe_sample_exact(pairs, int(sample_k_pairs), seed=sample_seed)
+
+    stats = {
+        "num_pairs": len(pairs),
+        "num_buckets": len(per_bucket_stats),
+        "bucket_stats": per_bucket_stats,
+        "pair_by_used": priority_keys[0] if priority_keys else None,
+        "group_cols_detected": group_cols,
+        "pubmed_answer_cut": bool(is_pubmed_like and pubmed_answer_cut),
+    }
+    return pairs, stats

@@ -23,7 +23,11 @@ try:
 except Exception:
     plt = None
     _HAS_MPL = False
-
+W_EPOCH = 8
+W_MEM   = 8
+W_NUM   = 7
+W_STEP  = 8
+SEP     = " "
 # =========================
 # 显存统计辅助（训练期全局峰值）
 # =========================
@@ -120,9 +124,50 @@ def _collate_fn(tokenizer, max_length: int):
             max_length=max_length,
             return_tensors="pt",
         )
+        global_attention_mask = torch.zeros_like(toks["input_ids"])
+        global_attention_mask[:, 0] = 1  # 假设第一个 token 做 global
+        toks["global_attention_mask"] = global_attention_mask
         toks["labels"] = labels
         return toks
     return _fn
+
+import inspect
+
+def _filter_forward_kwargs(model, batch: dict) -> dict:
+    """
+    仅将模型 forward 支持的 kwargs 传入，避免如 global_attention_mask 等参数导致 TypeError。
+    - 对支持 **kwargs 的 forward：仍只传常见字段，避免把 labels 之类误传。
+    - 对无法 introspect 的情况：退化为 input_ids/attention_mask。
+    """
+    # 常用可传入模型的字段（按需可加：token_type_ids / position_ids / head_mask / etc.）
+    candidate_keys = ("input_ids", "attention_mask", "token_type_ids", "position_ids", "global_attention_mask")
+
+    sig = getattr(model, "_mgt_eval_forward_sig", None)
+    if sig is None:
+        try:
+            sig = inspect.signature(model.forward)
+        except Exception:
+            sig = None
+        setattr(model, "_mgt_eval_forward_sig", sig)
+
+    if sig is None:
+        return {
+            "input_ids": batch["input_ids"],
+            "attention_mask": batch.get("attention_mask", None),
+        }
+
+    params = sig.parameters
+    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    allowed = set(params.keys())
+
+    out = {}
+    for k in candidate_keys:
+        v = batch.get(k, None)
+        if v is None:
+            continue
+        if has_varkw or (k in allowed):
+            out[k] = v
+    return out
 
 def _compute_loss(logits, labels, smoothing: float = 0.0):
     """
@@ -151,14 +196,14 @@ def _evaluate_loop(model, dataloader, device: str, smoothing_eval: float = 0.0, 
     it = tqdm(
         dataloader,
         desc="Valid",
-        leave=False,
+        leave=True,
         dynamic_ncols=True,
         disable=(len(dataloader) == 0),
     )
     for batch in it:
         batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
         with torch.amp.autocast("cuda", enabled=(fp16 and device.startswith("cuda"))):
-            out = model(input_ids=batch["input_ids"], attention_mask=batch.get("attention_mask", None))
+            out = model(**_filter_forward_kwargs(model, batch))
             loss = _compute_loss(out.logits, batch["labels"], smoothing=smoothing_eval)
         preds = torch.argmax(out.logits, dim=-1)
         correct += int((preds == batch["labels"]).sum().item())
@@ -181,9 +226,6 @@ def _split_and_backward(
     grad_accum: int,
     scaler: "torch.cuda.amp.GradScaler",
 ):
-    """
-    将当前 batch 沿着 batch 维度切成更小的 micro-chunks，按比例缩放 loss 做梯度累积，避免 OOM。
-    """
     B = batch["input_ids"].size(0)
     chunk = max(1, B // 2)
     while chunk >= 1:
@@ -191,12 +233,20 @@ def _split_and_backward(
             start = 0
             while start < B:
                 end = min(B, start + chunk)
-                cur = {k: (v[start:end] if hasattr(v, "shape") and getattr(v, "size", lambda *_: 0)(0) == B else v)
-                       for k, v in batch.items()}
+
+                # ✅ 正确构造 micro-batch（只切 B 维的 tensor）
+                cur = {}
+                for k, v in batch.items():
+                    if hasattr(v, "shape") and getattr(v, "size", lambda *_: 0)(0) == B:
+                        cur[k] = v[start:end]
+                    else:
+                        cur[k] = v
+
                 with torch.amp.autocast("cuda", enabled=(fp16 and device.startswith("cuda"))):
-                    out = model(input_ids=cur["input_ids"], attention_mask=cur.get("attention_mask", None))
+                    out = model(**_filter_forward_kwargs(model, cur))
                     loss = _compute_loss(out.logits, cur["labels"], smoothing=0.0)
                     scale = (end - start) / float(B)
+
                 scaler.scale(loss * scale / max(1, grad_accum)).backward()
                 start = end
             return True
@@ -223,21 +273,21 @@ def _moving_average(seq: List[float], window: int) -> List[float]:
     return out
 
 from collections import Counter
-def _build_data_info(dataset_spec, train_dataset, val_dataset):
+
+def _build_data_info(dataset_spec, train_dataset, val_dataset, test_dataset=None):
     info = {
-        "dataset_spec": dataset_spec,  # 文件路径 / HF 路由 / 你自定义的标识
+        "dataset_spec": dataset_spec,
         "num_examples": {
             "train": int(len(train_dataset)) if hasattr(train_dataset, "__len__") else None,
             "val": int(len(val_dataset)) if (val_dataset is not None and hasattr(val_dataset, "__len__")) else 0,
+            "test": int(len(test_dataset)) if (test_dataset is not None and hasattr(test_dataset, "__len__")) else 0,
         },
     }
-    # 可选：统计训练集标签分布（安全 try，不干扰训练）
     try:
         cnt = Counter(int(train_dataset[i]["label"]) for i in range(len(train_dataset)))
         info["label_distribution_train"] = {int(k): int(v) for k, v in sorted(cnt.items())}
     except Exception:
         pass
-    # 可选：如果 dataset_spec 是文件，记录哈希（方便复现实验）
     try:
         import hashlib, os
         if isinstance(dataset_spec, str) and os.path.isfile(dataset_spec):
@@ -282,7 +332,8 @@ def train_model(
     train_dataset,
     val_dataset,
     cfg,
-    dataset_spec: Optional[str] = None,   # ← 新增：数据集路径 / HF 路由等
+    dataset_spec: Optional[str] = None,
+    test_dataset=None,                 # ✅ NEW
 ) -> Dict[str, Any]:
     """
     通用训练管线（带 tqdm 进度条 & 周期日志）：
@@ -301,6 +352,7 @@ def train_model(
           "artifacts": Dict
         }
     """
+    torch.set_grad_enabled(True)
     device = _default_device(getattr(cfg, "device", None))
     mem_ctx = _reset_and_mark_cuda_peaks()
     model.to(device)
@@ -324,6 +376,7 @@ def train_model(
     eval_interval    = int(getattr(cfg, "eval_interval", 1000))
     save_strategy    = str(getattr(cfg, "save_strategy", "epoch")).lower()     # 'epoch' | 'steps'
     save_interval    = int(getattr(cfg, "save_interval", 1000))
+    save_every_epoch = bool(getattr(cfg, "save_every_epoch", False))
 
     max_grad_norm    = float(getattr(cfg, "max_grad_norm", 1.0))
     num_workers      = int(getattr(cfg, "num_workers", 0))
@@ -356,7 +409,7 @@ def train_model(
         "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "devices": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
     }
-    data_info = _build_data_info(dataset_spec, train_dataset, val_dataset)
+    data_info = _build_data_info(dataset_spec, train_dataset, val_dataset, test_dataset)
     args_json_path = os.path.join(output_dir, "train_args.json")
     with open(args_json_path, "w", encoding="utf-8") as f:
         json.dump({"args": cfg_dict, "env": env_info, "data": data_info}, f, ensure_ascii=False, indent=2)
@@ -373,6 +426,16 @@ def train_model(
     if val_dataset is not None and len(val_dataset) > 0:
         val_loader = DataLoader(
             val_dataset,
+            batch_size=eval_bs,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=_collate_fn(tokenizer, max_length),
+            pin_memory=True,
+        )
+    test_loader = None
+    if test_dataset is not None and hasattr(test_dataset, "__len__") and len(test_dataset) > 0:
+        test_loader = DataLoader(
+            test_dataset,
             batch_size=eval_bs,
             shuffle=False,
             num_workers=num_workers,
@@ -426,10 +489,19 @@ def train_model(
         st = time.perf_counter()
 
         optimizer.zero_grad(set_to_none=True)
+        # ---- 打印表头（只在第 1 个 epoch 打印一次）----
+        if progress:
+            print("\n" +
+                  f"{'Epoch':>{W_EPOCH}}{SEP}"
+                  f"{'GPU_mem':>{W_MEM}}{SEP}"
+                  f"{'L':>{W_NUM}}{SEP}"
+                  f"{'avg':>{W_NUM}}{SEP}"
+                  f"{'lr':>{W_NUM}}{SEP}"
+                  f"{'step':>{W_STEP}}")
         train_iter = tqdm(
             train_loader,
             desc=f"Train [ep {ep}/{epochs}]",
-            leave=False,
+            leave=True,
             dynamic_ncols=True,
             disable=(not progress),
         )
@@ -439,7 +511,7 @@ def train_model(
 
             try:
                 with torch.amp.autocast("cuda", enabled=(fp16 and device.startswith("cuda"))):
-                    out = model(input_ids=batch["input_ids"], attention_mask=batch.get("attention_mask", None))
+                    out = model(**_filter_forward_kwargs(model, batch))
                     loss = _compute_loss(out.logits, batch["labels"], smoothing=label_smoothing)
                 scaler.scale(loss / max(1, grad_accum)).backward()
                 oom_fallback_used = False
@@ -480,18 +552,23 @@ def train_model(
                     cur_lr = scheduler.get_last_lr()[0]
                 except Exception:
                     cur_lr = optimizer.param_groups[0]["lr"]
-                train_iter.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{cur_lr:.2e}", gs=global_step,
-                                       oom="Y" if oom_fallback_used else "N")
 
-            # 周期性日志打印（每 log_interval 次 update 打印一次）
-            if log_interval > 0 and global_step > 0 and (global_step % log_interval == 0) and (step % grad_accum == 0):
-                avg_loss_log = loss_since_log / float(log_interval)
-                loss_since_log = 0.0
-                try:
-                    cur_lr = scheduler.get_last_lr()[0]
-                except Exception:
-                    cur_lr = optimizer.param_groups[0]["lr"]
-                print(f"[step {global_step}] loss={avg_loss_log:.4f} lr={cur_lr:.2e}")
+                # 当前 GPU 显存占用（reserved）
+                if torch.cuda.is_available():
+                    mem = f'{torch.cuda.memory_reserved() / 1E9:.3g}G'
+                else:
+                    mem = "0G"
+
+                # 按你给的 style 组织一行描述（这相当于你之前 one_loss 分支）
+                desc = (
+                    f"{f'{ep}/{epochs}':>{W_EPOCH}}{SEP}"
+                    f"{mem:>{W_MEM}}{SEP}"
+                    f"{loss_val:>{W_NUM}.4f}{SEP}"
+                    f"{avg_loss:>{W_NUM}.4f}{SEP}"
+                    f"{cur_lr:>{W_NUM}.2e}{SEP}"
+                    f"{global_step:>{W_STEP}d}"
+                )
+                train_iter.set_description(desc)
 
             # 按步评估
             if (val_loader is not None) and (eval_strategy == "steps") and (eval_interval > 0) \
@@ -515,7 +592,7 @@ def train_model(
                     break
 
             # 按步保存
-            if (save_strategy == "steps") and (save_interval > 0) and (global_step > 0) \
+            if False and (save_strategy == "steps") and (save_interval > 0) and (global_step > 0) \
                and (global_step % save_interval == 0) and (step % grad_accum == 0):
                 step_dir = os.path.join(output_dir, f"step{global_step}")
                 os.makedirs(step_dir, exist_ok=True)
@@ -553,7 +630,8 @@ def train_model(
             print(f"[Epoch {ep}] train_loss={avg_train_loss:.4f}  train_time={train_time:.1f}s")
 
         # 按 epoch 保存
-        if save_strategy == "epoch":
+        # 按 epoch 保存（默认关闭；只保留 best/last）
+        if save_every_epoch and (save_strategy == "epoch"):
             ep_dir = os.path.join(output_dir, f"ep{ep}")
             os.makedirs(ep_dir, exist_ok=True)
             model.save_pretrained(ep_dir)
@@ -602,11 +680,92 @@ def train_model(
     best_val_acc = None
     if val_loader is not None and metric_for_best == "val_acc" and best_metric_val not in (-float("inf"), float("inf")):
         best_val_acc = best_metric_val if greater_is_better else -best_metric_val
+    # ====== (optional) Test evaluation at end ======
+    test_acc = None
+    test_loss = None
+    test_used = None  # "best" or "last"
+    import torch.nn.functional as F
+
+    @torch.no_grad()
+    def _evaluate_loop_debug(model, dataloader, device: str, ai_label_id: int = 1, fp16: bool = True):
+        model.eval()
+        tot = 0
+        c_argmax = 0
+        c_prob05 = 0
+        c_logitai0 = 0
+        c_logitdiff0 = 0
+
+        for batch in dataloader:
+            batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
+            with torch.amp.autocast("cuda", enabled=(fp16 and device.startswith("cuda"))):
+                out = model(**_filter_forward_kwargs(model, batch))
+            logits = out.logits.float()  # 用 float32 统一比较，避免 fp16 边界抖动
+            y = batch["labels"]
+
+            # 1) argmax
+            pred_argmax = logits.argmax(dim=-1)
+            c_argmax += int((pred_argmax == y).sum().item())
+
+            # 2) softmax p(ai)>0.5（二分类时应与 argmax 等价）
+            probs = F.softmax(logits, dim=-1)
+            p_ai = probs[:, ai_label_id]
+            other = 1 - ai_label_id
+            pred_prob05 = torch.where(p_ai >= 0.5, torch.full_like(y, ai_label_id), torch.full_like(y, other))
+            c_prob05 += int((pred_prob05 == y).sum().item())
+
+            # 3) 只看 logit_ai > 0
+            logit_ai = logits[:, ai_label_id]
+            pred_logitai0 = torch.where(logit_ai > 0, torch.full_like(y, ai_label_id), torch.full_like(y, other))
+            c_logitai0 += int((pred_logitai0 == y).sum().item())
+
+            # 4) 看 logit_ai - logit_other > 0（应与 argmax 等价）
+            logit_other = logits[:, other]
+            diff = logit_ai - logit_other
+            pred_diff0 = torch.where(diff > 0, torch.full_like(y, ai_label_id), torch.full_like(y, other))
+            c_logitdiff0 += int((pred_diff0 == y).sum().item())
+
+            tot += int(y.numel())
+
+        def _fmt(x): return f"{x / max(1, tot):.4f}"
+
+    # 默认：优先用 best checkpoint 在测试集上评估（可用 cfg.eval_test_on_best 控制）
+    eval_test_on_best = bool(getattr(cfg, "eval_test_on_best", True))
+
+    if test_loader is not None:
+        eval_model = model
+        if eval_test_on_best and best_dir:
+            try:
+                eval_model = model.__class__.from_pretrained(best_dir)
+                eval_model.to(device)
+                test_used = "best"
+            except Exception as e:
+                print(f"[test] reload best from {best_dir} failed, fallback to last. err={e}")
+                eval_model = model
+                test_used = "last"
+        else:
+            test_used = "last"
+        if test_loader is not None:
+            _evaluate_loop_debug(eval_model, test_loader, device=device, ai_label_id=1, fp16=fp16)
+        test_acc, test_loss = _evaluate_loop(eval_model, test_loader, device=device, smoothing_eval=0.0, fp16=fp16)
+
+        if test_acc is not None and test_loss is not None:
+            print(f"[test] ({test_used}) test_acc={test_acc:.4f} test_loss={test_loss:.4f}")
+
+        if (eval_model is not model):
+            try:
+                del eval_model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     summary = {
         "best_dir": best_dir,
         "last_dir": last_dir or output_dir,
         "best_val_acc": best_val_acc,
+        "test_acc": test_acc,            # ✅ NEW
+        "test_loss": test_loss,          # ✅ NEW
+        "test_used": test_used,          # ✅ NEW: best/last
         "data": data_info, 
         "history": history,
         "memory": mem_stats,
@@ -651,6 +810,9 @@ def train_model(
         "best_dir": best_dir,
         "last_dir": last_dir or output_dir,
         "best_val_acc": best_val_acc,
+        "test_acc": test_acc,            # ✅ NEW
+        "test_loss": test_loss,          # ✅ NEW
+        "test_used": test_used,          # ✅ NEW
         "history": history,
         "memory": mem_stats,
         "timing": summary["timing"],

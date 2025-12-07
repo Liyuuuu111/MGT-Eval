@@ -9,3 +9,4 @@ from .gltr import *
 from .raidar import *
 from .TOCSIN import *
 from .lastde import *
+from .dnadetectllm import *

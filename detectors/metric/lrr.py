@@ -92,6 +92,8 @@ def _lrr_single_text(model, tokenizer, device: str, text: str, max_len: int) -> 
 
         likelihood = _get_likelihood(logits, labels)
         logrank = _get_logrank(logits, labels)
+        if logrank == 0:
+            return 0
         return -likelihood / logrank
 
 
