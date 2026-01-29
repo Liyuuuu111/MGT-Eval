@@ -191,7 +191,7 @@ def _coerce_yaml_value(key: str, value: Any) -> Any:
     return value
 
 def _apply_yaml_config(args: argparse.Namespace, argv: Optional[List[str]]) -> argparse.Namespace:
-    cfg_path = getattr(args, "config", None)
+    cfg_path = getattr(args, "config", None) or getattr(args, "config_path", None)
     if not cfg_path:
         return args
     cfg = _load_yaml_config(cfg_path)
@@ -1558,6 +1558,8 @@ def main(argv=None):
                           help='Extra JSON dict forwarded to the trainer (trainer-native keys).')
     ap_train.add_argument("--config", default=None,
                           help="YAML config file containing CLI args (CLI flags override YAML).")
+    ap_train.add_argument("config_path", nargs="?", default=None,
+                          help="YAML config file (positional). Same as --config.")
 
     ap_train.set_defaults(_fn=cmd_train)
     ap_cal.set_defaults(_fn=cmd_calibrate)
