@@ -13,6 +13,10 @@ from types import SimpleNamespace
 import random
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 # 复用你给的通用训练器
 from mgt_eval.train.train import train_model as _train_seqcls_model
@@ -153,6 +157,66 @@ def _has_trainer(name: str) -> bool:
 def _safe_tag(s: str) -> str:
     s = (s or "").strip()
     return "".join([c if c.isalnum() or c in "._-+" else "-" for c in s]).strip("-") or "run"
+
+def _yaml_available() -> bool:
+    return yaml is not None
+
+def _load_yaml_config(path: str) -> Dict[str, Any]:
+    if not _yaml_available():
+        raise SystemExit("[MGTEval][cli] YAML support requires PyYAML (missing).")
+    if not path:
+        raise SystemExit("[MGTEval][cli] --config requires a YAML file path.")
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"[MGTEval][cli] YAML config must be a mapping, got: {type(cfg)}")
+    return cfg
+
+def _argv_has_key(argv: Optional[List[str]], key: str) -> bool:
+    if not argv:
+        return False
+    needle = f"--{key}"
+    if needle in argv:
+        return True
+    no_needle = f"--no-{key}"
+    if no_needle in argv:
+        return True
+    return False
+
+def _coerce_yaml_value(key: str, value: Any) -> Any:
+    if key in {"detector_kwargs", "train_kwargs"} and isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+def _apply_yaml_config(args: argparse.Namespace, argv: Optional[List[str]]) -> argparse.Namespace:
+    cfg_path = getattr(args, "config", None)
+    if not cfg_path:
+        return args
+    cfg = _load_yaml_config(cfg_path)
+    if "cmd" in cfg and cfg.get("cmd") and cfg.get("cmd") != getattr(args, "cmd", None):
+        raise SystemExit(
+            f"[MGTEval][cli] YAML cmd '{cfg.get('cmd')}' does not match CLI cmd '{args.cmd}'."
+        )
+    cfg_args = cfg.get("args", cfg)
+    if not isinstance(cfg_args, dict):
+        raise SystemExit("[MGTEval][cli] YAML 'args' must be a mapping.")
+    for key, value in cfg_args.items():
+        if key in {"cmd", "args"}:
+            continue
+        if _argv_has_key(argv, key):
+            continue
+        setattr(args, key, _coerce_yaml_value(key, value))
+    return args
+
+def _require_args(args: argparse.Namespace, keys: List[str], cmd: str) -> None:
+    missing = [k for k in keys if not getattr(args, k, None)]
+    if missing:
+        raise SystemExit(
+            f"[MGTEval][{cmd}] Missing required arguments: {', '.join(missing)}. "
+            "Provide them via CLI or YAML --config."
+        )
 
 def _stratified_split_exact(examples, train_k: int, val_k: int, seed: int):
     """
@@ -1220,7 +1284,7 @@ def main(argv=None):
     # run
     ap_run = sub.add_parser("detect", help="Run detector on a dataset")
     ap_run.add_argument(
-        "--detector", required=True,
+        "--detector", required=False,
         help=(
             "Detector name. \n"
             "1) Logic detectors (gltr/lastde/...): needs --model1 as scoring model.\n"
@@ -1228,7 +1292,9 @@ def main(argv=None):
             "3) HF pretrained aliases (openai-detector-base/simpleai-detector/...): NO --model1 needed."
         )
     )
-    ap_run.add_argument("--data", required=True)
+    ap_run.add_argument("--data", required=False)
+    ap_run.add_argument("--config", default=None,
+                        help="YAML config file containing CLI args (CLI flags override YAML).")
         # ---- NEW: ASR (Attack Success Rate) ----
     ap_run.add_argument(
         "--attack",
@@ -1375,9 +1441,11 @@ def main(argv=None):
 
     # calibrate
     ap_cal = sub.add_parser("calibrate", help="Fit and save a calibrator JSON")
-    ap_cal.add_argument("--detector", required=True)
-    ap_cal.add_argument("--data", required=True)
-    ap_cal.add_argument("--model1", required=True)
+    ap_cal.add_argument("--detector", required=False)
+    ap_cal.add_argument("--data", required=False)
+    ap_cal.add_argument("--model1", required=False)
+    ap_cal.add_argument("--config", default=None,
+                        help="YAML config file containing CLI args (CLI flags override YAML).")
     ap_cal.add_argument("--model2", default=None)
     ap_cal.add_argument("--batch_size", type=int, default=32)
     ap_cal.add_argument("--sample_k", type=int, default=None)
@@ -1407,7 +1475,7 @@ def main(argv=None):
     # train
     ap_train = sub.add_parser("train", help="Train a finetuned detector with unified interface")
     ap_train.add_argument(
-        "--detector", required=True,
+        "--detector", required=False,
         help=(
             "Trainer name (coco/greater/pecola/...) OR an HF model id/local path for classification finetuning.\n"
             "Rule: if detector matches a registered trainer -> use it; else -> HF classification finetune.\n"
@@ -1417,7 +1485,7 @@ def main(argv=None):
     )
 
     # -------- unified datasets --------
-    ap_train.add_argument("--dataset_train", "--dataset_training", dest="dataset_train", required=True,
+    ap_train.add_argument("--dataset_train", "--dataset_training", dest="dataset_train", required=False,
                           help="Primary training dataset spec/path.")
     ap_train.add_argument("--dataset_val", "--dataset_validation", dest="dataset_val", default=None,
                           help="Optional validation dataset spec/path.")
@@ -1488,11 +1556,20 @@ def main(argv=None):
     # keep escape hatch
     ap_train.add_argument("--train_kwargs", default=None,
                           help='Extra JSON dict forwarded to the trainer (trainer-native keys).')
+    ap_train.add_argument("--config", default=None,
+                          help="YAML config file containing CLI args (CLI flags override YAML).")
 
     ap_train.set_defaults(_fn=cmd_train)
     ap_cal.set_defaults(_fn=cmd_calibrate)
 
     args = ap.parse_args(argv)
+    args = _apply_yaml_config(args, argv)
+    if args.cmd == "detect":
+        _require_args(args, ["detector", "data"], "detect")
+    elif args.cmd == "calibrate":
+        _require_args(args, ["detector", "data", "model1"], "calibrate")
+    elif args.cmd == "train":
+        _require_args(args, ["detector", "dataset_train"], "train")
     args._fn(args)
 
 if __name__ == "__main__":
