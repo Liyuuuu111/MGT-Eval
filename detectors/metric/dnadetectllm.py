@@ -53,7 +53,7 @@ def assert_tokenizer_consistency(model_id_1: str, model_id_2: str):
 # ---------------------------------------------------------
 # 全局配置 & 阈值（保留原实现）
 # ---------------------------------------------------------
-torch.set_grad_enabled(False)
+# torch.set_grad_enabled(False)
 
 huggingface_config = {
     # 仅在需要访问 HuggingFace 私有模型时使用；原始实现中是注释掉的

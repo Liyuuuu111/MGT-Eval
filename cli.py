@@ -60,21 +60,45 @@ _HF_ALIASES = {
     "electra-large-discriminator": "google/electra-large-discriminator",
 }
 
-def _parse_attack_datasets(v):
+def _parse_attack_dataset_single(v, *, data_fallback: Optional[str] = None) -> Optional[List[str]]:
+    """
+    支持三种写法（最终都只得到 0/1 个 attack dataset）：
+      1) 不传 --attack -> None
+      2) 传 --attack (无参数) -> 使用 --data 作为 attack dataset（paired-record 攻击数据集）
+      3) 传 --attack path.jsonl -> 使用该 path
+    同时兼容旧写法：如果 argparse 产生 list（比如历史脚本用 action=append），也会检测并强制只留一个。
+    """
     if v is None:
         return None
-    # v is like: ["a.jsonl", "b.jsonl,c.jsonl"]
-    out = []
-    for item in v:
-        if item is None:
-            continue
-        s = str(item).strip()
-        if not s:
-            continue
-        parts = [p.strip() for p in s.split(",") if p.strip()]
-        out.extend(parts)
-    return out or None
 
+    # 兼容：如果 v 是 list（旧脚本可能重复传），强制只能有 1 个有效项
+    if isinstance(v, list):
+        items = []
+        for x in v:
+            if x is None:
+                continue
+            s = str(x).strip()
+            if not s:
+                continue
+            items.append(s)
+        if not items:
+            return None
+        if len(items) > 1:
+            raise SystemExit(f"[MGTEval][detect] --attack only supports ONE dataset, got: {items}")
+        v = items[0]
+
+    s = str(v).strip()
+    # 写法 2：--attack（无参数） -> const="__SELF__"
+    if s == "__SELF__":
+        if not data_fallback:
+            raise SystemExit("[MGTEval][detect] --attack used without a path, but --data is empty.")
+        return [str(data_fallback)]
+
+    # 写法 3：--attack a.jsonl,b.jsonl 不允许（强制一个）
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if len(parts) != 1:
+        raise SystemExit(f"[MGTEval][detect] --attack only supports ONE dataset (no commas). Got: {s}")
+    return parts
 
 def _resolve_hf_id_or_path(s: str) -> str:
     s = (s or "").strip()
@@ -442,7 +466,10 @@ def cmd_run(args):
 
     # evaluator/Pretrained 统一的 sample_k 规范：<=0 -> None
     sample_k = None if (args.sample_k is None or int(args.sample_k) <= 0) else int(args.sample_k)
-    attack_datasets = _parse_attack_datasets(getattr(args, "attack_datasets", None))
+    attack_datasets = _parse_attack_dataset_single(
+        getattr(args, "attack_dataset", None),
+        data_fallback=getattr(args, "data", None),
+    )
     asr_save_details = bool(getattr(args, "asr_save_details", True))
 
     # ------------------------------------------------------------
@@ -499,6 +526,44 @@ def cmd_run(args):
             raise SystemExit("[MGTEval][detective] missing --embedding_ckpt_path (or use --model1).")
 
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        use_standard_eval = bool(getattr(args, "detective_eval", False))
+        if use_standard_eval:
+            det = PretrainedDetector(
+                model_path=embedding_model_name,
+                name=det_name,
+                device=device,
+                max_length=int(getattr(args, "max_length", 512)),
+                fp16=bool(getattr(args, "fp16", False)) and str(device).startswith("cuda"),
+                knn_train_dataset=train_dataset,
+                knn_embedding_model_name=embedding_model_name,
+                knn_embedding_ckpt_path=embedding_ckpt_path,
+                knn_pooling=getattr(args, "pooling", "average"),
+                knn_K=int(getattr(args, "max_K", 5)),
+                knn_backend=str(getattr(args, "knn_backend", "torch")).lower(),
+                knn_cache_root=args.cache_root,
+                knn_index_name=args.index_name,
+                knn_reuse_database=args.reuse_database,
+                knn_save_database=args.save_database,
+                knn_use_gpu_index=args.use_gpu_index,
+                knn_index_batch_size=int(getattr(args, "index_batch_size", 8)),
+            )
+            _eval(
+                detector=det,
+                dataset=args.data,
+                batch_size=int(args.batch_size),
+                threshold=float(args.threshold),
+                show_progress=(not args.no_progress),
+                out_dir=args.out,
+                save_curves=bool(getattr(args, "save_curves", True)),
+                k_runs=int(getattr(args, "k_runs", 1)),
+                attack_datasets=attack_datasets,
+                asr_save_details=asr_save_details,
+                sample_k=sample_k,
+                sample_seed=int(args.seed),
+                group_cols=None,
+            )
+            return
+
         det = PretrainedDetector(
             device=device,
             max_length=int(getattr(args, "max_length", 512)),
@@ -614,13 +679,6 @@ def cmd_run(args):
             "If you meant a builtin HF alias, use --detector openai-detector-base/... without --model1."
         )
 
-    examples, _ = load_dataset_unified(
-        dataset=args.data,
-        sample_k=sample_k,
-        sample_seed=int(args.seed),
-        group_cols=None,
-    )
-
     det = _build_detector(
         detector_name=args.detector,
         model1=args.model1,
@@ -634,7 +692,7 @@ def cmd_run(args):
 
     _eval(
         detector=det,
-        dataset=examples,
+        dataset=args.data,
         batch_size=int(args.batch_size),
         threshold=float(args.threshold),
         show_progress=(not args.no_progress),
@@ -643,6 +701,9 @@ def cmd_run(args):
         k_runs=int(getattr(args, "k_runs", 1)),
         attack_datasets=attack_datasets,
         asr_save_details=asr_save_details,
+        sample_k=sample_k,                # ✅ 让 evaluator 自己加载时也能采样
+        sample_seed=int(args.seed),
+        group_cols=None,
     )
 
 def cmd_calibrate(args):
@@ -1171,17 +1232,19 @@ def main(argv=None):
         # ---- NEW: ASR (Attack Success Rate) ----
     ap_run.add_argument(
         "--attack",
-        dest="attack_datasets",
-        action="append",
+        dest="attack_dataset",
+        nargs="?",              # ✅ 允许可选参数
+        const="__SELF__",        # ✅ 只写 --attack 时，用 --data 作为 attack dataset
         default=None,
         help=(
-            "Attack dataset path/spec. Can be repeated.\n"
-            "Examples:\n"
-            "  --attack adv1.jsonl --attack adv2.jsonl\n"
-            "Or comma-separated in one flag:\n"
-            "  --attack adv1.jsonl,adv2.jsonl"
+            "Enable ASR with ONE attack dataset.\n"
+            "Usage:\n"
+            "  --attack            (use --data itself as paired-record attack dataset)\n"
+            "  --attack adv.jsonl  (use given adv.jsonl)\n"
+            "Note: only ONE dataset is supported (no repeated flags, no commas)."
         ),
     )
+
     ap_run.add_argument(
         "--no-asr-details",
         dest="asr_save_details",
@@ -1249,6 +1312,11 @@ def main(argv=None):
     # 你 run 已经有 --seed / --batch_size / --num_workers(目前只有 train 有)；
     # 这里建议 detect 也提供 num_workers
     ap_run.add_argument("--num_workers", type=int, default=0, help="Detective: num_workers for dataloading.")
+    ap_run.add_argument(
+        "--detective_eval",
+        action="store_true",
+        help="Detective: run standard evaluator (metrics/summary.json); uses --max_K as K.",
+    )
 
     # NOTE: 不再强制 required=True（因为 openai-detector-base 等不需要）
     ap_run.add_argument("--model1", "--model", dest="model1", required=False,
@@ -1258,7 +1326,7 @@ def main(argv=None):
     ap_run.add_argument("--batch_size", type=int, default=8)
     ap_run.add_argument("--threshold", type=float, default=0.5)
     ap_run.add_argument("--seed", type=int, default=114514)
-    ap_run.add_argument("--sample_k", type=int, default=1000)
+    ap_run.add_argument("--sample_k", type=int, default=None)
     ap_run.add_argument("--device", default=None)
 
     # ---- NEW: seqcls/Pretrained 评测用参数 ----
@@ -1312,7 +1380,7 @@ def main(argv=None):
     ap_cal.add_argument("--model1", required=True)
     ap_cal.add_argument("--model2", default=None)
     ap_cal.add_argument("--batch_size", type=int, default=32)
-    ap_cal.add_argument("--sample_k", type=int, default=10000)
+    ap_cal.add_argument("--sample_k", type=int, default=None)
     ap_cal.add_argument("--seed", type=int, default=114514)
     ap_cal.add_argument("--device", default=None)
     ap_cal.add_argument("--bf16", action="store_true")

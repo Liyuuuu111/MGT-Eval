@@ -13,6 +13,7 @@ from .text_attacks import (
   HFPromptParaphraseAttack, APIPromptParaphraseAttack, ChatGPTParaphraseAttack,
   SynonymSubstitutionAttack, WordSubstModelBaseAttack,
   BackTranslationAttack,
+  HumanizeAttackAPI, HumanizeAttackHF,
 )
 from .regen_attacks import NoRegen, TemperatureSweep, TopPSweep, GreedyVsSample
 # factory.py 里：from .text_attacks import (...) 需要补齐导入
@@ -71,7 +72,7 @@ def load_attacks_from_config(path: Optional[str]) -> AttackBundle:
         """
         tp = (tp_raw or "").strip().lower()
 
-        # ✅ 兼容旧写法 -> 新类别
+        # ✅ 兼容旧写法 -> 新类别/别名
         alias = {
             "ptb": "span",
             "span_perturbation": "span",
@@ -85,11 +86,27 @@ def load_attacks_from_config(path: Optional[str]) -> AttackBundle:
             "word_subst_modelbase": "syno",
             "back_translate": "back_trans",
             "backtranslation": "back_trans",
-            # 兼容旧：typo_xxx / homo_xxx / form_xxx
+
+            # ✅ NEW: accept short aliases for meta-typo attacks
+            "del": "dele",
+            "delete": "dele",
+            "ins": "inse",
+            "insert": "inse",
+            "sub": "subs",
+            "subst": "subs",
+            "trans": "tran",
+            "translate": "tran",
         }
+        alias.update({
+            "humanize": "humanize",
+            "humanization": "humanize",
+            "anthropomorphic": "humanize",
+            "personify": "humanize",
+            "persona": "humanize",
+        })
         tp2 = alias.get(tp, tp)
 
-        # ✅ 元攻击：前四个字母
+        # ✅ 元攻击：四个类别独立存在
         if tp2 in ("inse", "dele", "subs", "tran"):
             return tp2, None, None
 
@@ -215,17 +232,32 @@ def load_attacks_from_config(path: Optional[str]) -> AttackBundle:
         # typo & its 4 meta attacks: inse/dele/subs/tran
         # --------------------
         if tp in ("typo", "inse", "dele", "subs", "tran"):
-            # 若 tp 是元攻击（四字母），直接映射到对应 mode
+            # ✅ 规则：只有 tp=="typo" 才归为 typo 类
+            # ✅ tp in (inse/dele/subs/tran) 时，输出类别就是它们自己（attack 名称与分文件 key 都会随之变化）
             mode = tp
             if tp == "typo":
                 # 不写 mode -> mix；也支持显式 mode（mix/insert/delet/subst/trans 或 inse/dele/subs/tran）
                 mode = str(item.get("mode") or var_hint or "mix").strip().lower()
 
-            text_attackers.append(TypoAttack(
+            atk = TypoAttack(
                 mode=mode,
                 pct_words_masked=float(item.get("pct_words_masked", 0.6)),
                 n_variants=int(item.get("n_variants", 1)),
-            ))
+            )
+
+            # ✅ 关键：让 ta.name 变成 'dele'/'inse'/'subs'/'tran'
+            # 这样 builder 里写出的 attack/meta/active_attack 都会变成 text_dele / text_inse / ...
+            if tp in ("inse", "dele", "subs", "tran"):
+                try:
+                    atk.name = tp
+                except Exception:
+                    # 如果 TypoAttack.name 是只读 property，就退化为加一个新属性（尽量不报错）
+                    try:
+                        setattr(atk, "name", tp)
+                    except Exception:
+                        pass
+
+            text_attackers.append(atk)
             continue
 
         # --------------------
@@ -305,6 +337,66 @@ def load_attacks_from_config(path: Optional[str]) -> AttackBundle:
                 cache_dir=_pick_cache_dir(item),
                 dtype=str(item.get("dtype", "bf16")),
             ))
+            continue
+        # --------------------
+        # humanize (Anthropomorphic / Humanization rewrite)
+        #   backend: api / hf
+        # --------------------
+        if tp == "humanize":
+            backend = str(item.get("backend", "api")).strip().lower()
+
+            # 数据集路径：你说“接受传入的一个数据集”，这里用 attack_dataset_path
+            ds = _pick(item, ["attack_dataset_path", "dataset", "attack_dataset", "dataset_path", "data"], None)
+            if not ds:
+                raise ValueError("humanize attack requires `attack_dataset_path` (or `dataset`).")
+            import os 
+        
+            # 相对路径：以 config 文件所在目录为基准
+            if isinstance(ds, str) and path:
+                base = os.path.dirname(os.path.abspath(path))
+                if not os.path.isabs(ds):
+                    ds = os.path.join(base, ds)
+
+            # 公共参数
+            common = dict(
+                attack_dataset_path=str(ds),
+                n_pairs=int(item.get("n_pairs", 3)),
+                max_input_tokens=int(item.get("max_input_tokens", 4096)),
+                max_output_tokens=int(item.get("max_output_tokens", 512)),
+                temperature=float(item.get("temperature", 0.9)),
+                top_p=float(item.get("top_p", 0.95)),
+                n_variants=int(item.get("n_variants", 1)),
+            )
+
+            if backend == "api":
+                text_attackers.append(HumanizeAttackAPI(
+                    **common,
+                    model=str(item.get("model", "deepseek-chat")),
+                    base_url=str(item.get("base_url", "https://api.deepseek.com")),
+                    api_key=str(item.get("api_key", "")),
+                    top_k=item.get("top_k", None),
+                    frequency_penalty=float(item.get("frequency_penalty", 0.0)),
+                    presence_penalty=float(item.get("presence_penalty", 0.0)),
+                    timeout=float(item.get("timeout", 60.0)),
+                    retries=int(item.get("retries", 5)),
+                    sleep=float(item.get("sleep", 0.2)),
+                ))
+            elif backend == "hf":
+                model = _pick(item, ["model", "model_name_or_path"], None)
+                if not model:
+                    raise ValueError("humanize backend=hf requires `model` / `model_name_or_path`.")
+                text_attackers.append(HumanizeAttackHF(
+                    **common,
+                    model_name_or_path=str(model),
+                    do_sample=bool(item.get("do_sample", True)),
+                    top_k=item.get("top_k", 50),
+                    device=str(item.get("device", "cuda")),
+                    cache_dir=_pick_cache_dir(item),
+                    dtype=str(item.get("dtype", "bf16")),
+                ))
+            else:
+                raise ValueError(f"Unknown humanize backend: {backend}")
+
             continue
 
         else:

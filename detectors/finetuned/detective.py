@@ -548,12 +548,11 @@ class SimCLR_Classifier_SCL(nn.Module):
         self.temperature = opt.get("temperature", 0.07)
         self.fabric = fabric
         self.model = TextEmbeddingModel(opt["embedding_model"])
-        self.device = next(self.model.parameters()).device
         self.classifier = ClassificationHead(opt["projection_size"], opt["classifier_dim"])
-        self.a = torch.tensor(opt.get("a", 1.0), device=self.device)
-        self.d = torch.tensor(opt.get("d", 1.0), device=self.device)
         self.only_classifier = bool(opt.get("only_classifier", False))
-        self.eps = torch.tensor(1e-6, device=self.device)
+        self.register_buffer("a", torch.tensor(opt.get("a", 1.0), dtype=torch.float32))
+        self.register_buffer("d", torch.tensor(opt.get("d", 1.0), dtype=torch.float32))
+        self.register_buffer("eps", torch.tensor(1e-6, dtype=torch.float32))
 
     def get_encoder(self):
         return self.model
@@ -584,7 +583,7 @@ class SimCLR_Classifier_SCL(nn.Module):
         out = self.classifier(q)
         loss_cls = F.cross_entropy(out, labels_de)
         gt = torch.zeros(logits_label.size(0), dtype=torch.long, device=logits_label.device)
-        loss_scl = torch.tensor(0.0, device=self.device) if self.only_classifier else F.cross_entropy(logits_label, gt)
+        loss_scl = torch.tensor(0.0, device=logits_label.device) if self.only_classifier else F.cross_entropy(logits_label, gt)
         loss = self.a * loss_scl + self.d * loss_cls
 
         if self.training:
@@ -602,14 +601,13 @@ class SimCLR_Classifier(nn.Module):
         self.temperature = opt.get("temperature", 0.07)
         self.fabric = fabric
         self.model = TextEmbeddingModel(opt["embedding_model"])
-        self.device = next(self.model.parameters()).device
         self.classifier = ClassificationHead(opt["projection_size"], opt["classifier_dim"])
         self.only_classifier = bool(opt.get("only_classifier", False))
-        self.a = torch.tensor(opt.get("a", 1.0), device=self.device)
-        self.b = torch.tensor(opt.get("b", 1.0), device=self.device)
-        self.c = torch.tensor(opt.get("c", 1.0), device=self.device)
-        self.d = torch.tensor(opt.get("d", 1.0), device=self.device)
-        self.eps = torch.tensor(1e-6, device=self.device)
+        self.register_buffer("a", torch.tensor(opt.get("a", 1.0), dtype=torch.float32))
+        self.register_buffer("b", torch.tensor(opt.get("b", 1.0), dtype=torch.float32))
+        self.register_buffer("c", torch.tensor(opt.get("c", 1.0), dtype=torch.float32))
+        self.register_buffer("d", torch.tensor(opt.get("d", 1.0), dtype=torch.float32))
+        self.register_buffer("eps", torch.tensor(1e-6, dtype=torch.float32))
 
     def get_encoder(self):
         return self.model
@@ -676,6 +674,7 @@ class SimCLR_Classifier(nn.Module):
     def forward(self, encoded_batch, model_idx, set_idx, labels_de):
         q = self.model(encoded_batch)
         k = q.detach().clone()
+        device = q.device
         k = self.fabric.all_gather(k).view(-1, k.size(1))
         k_label = self.fabric.all_gather(labels_de).view(-1)
         k_model = self.fabric.all_gather(model_idx).view(-1)
@@ -692,10 +691,10 @@ class SimCLR_Classifier(nn.Module):
         gt_label = torch.zeros(lg_label.size(0), dtype=torch.long, device=lg_label.device) if lg_label.numel() else None
         gt_human = torch.zeros(lg_human.size(0), dtype=torch.long, device=lg_human.device) if lg_human.numel() else None
 
-        loss_model = F.cross_entropy(lg_model, gt_model) if gt_model is not None else torch.tensor(0.0, device=self.device)
-        loss_set = F.cross_entropy(lg_set, gt_set) if gt_set is not None else torch.tensor(0.0, device=self.device)
-        loss_label = F.cross_entropy(lg_label, gt_label) if gt_label is not None else torch.tensor(0.0, device=self.device)
-        loss_human = F.cross_entropy(lg_human.to(torch.float64), gt_human) if gt_human is not None else torch.tensor(0.0, device=self.device)
+        loss_model = F.cross_entropy(lg_model, gt_model) if gt_model is not None else torch.tensor(0.0, device=device)
+        loss_set = F.cross_entropy(lg_set, gt_set) if gt_set is not None else torch.tensor(0.0, device=device)
+        loss_label = F.cross_entropy(lg_label, gt_label) if gt_label is not None else torch.tensor(0.0, device=device)
+        loss_human = F.cross_entropy(lg_human.to(torch.float64), gt_human) if gt_human is not None else torch.tensor(0.0, device=device)
 
         loss = self.a*loss_model + self.b*loss_set + self.c*loss_label + (self.a+self.b+self.c)*loss_human + self.d*loss_cls
 
@@ -1005,6 +1004,7 @@ def _train_detective(cfg: TrainCfg, **kwargs) -> Dict[str, Any]:
     )
 
     # ====== Fabric（保留原论文并行化思路） ======
+    is_dummy_fabric = False
     if _FABRIC_AVAILABLE and cfg.devices > 1:
         strategy = DDPStrategy(find_unused_parameters=True)
         fabric = Fabric(accelerator="cuda", devices=cfg.devices, precision="bf16-mixed", strategy=strategy)
@@ -1028,6 +1028,7 @@ def _train_detective(cfg: TrainCfg, **kwargs) -> Dict[str, Any]:
             def barrier(self):
                 pass
         fabric = _DummyFabric()
+        is_dummy_fabric = True
 
     if hasattr(fabric, "launch"):
         fabric.launch()
@@ -1077,6 +1078,9 @@ def _train_detective(cfg: TrainCfg, **kwargs) -> Dict[str, Any]:
         for n, p in model.model.named_parameters():
             if "emb" in n:
                 p.requires_grad = False
+
+    if is_dummy_fabric:
+        model = model.to(device)
 
     # ====== 优化器/调度器（沿用 DeTeCtive 代码逻辑） ======
     params = filter(lambda p: p.requires_grad, model.parameters())

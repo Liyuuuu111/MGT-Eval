@@ -10,10 +10,112 @@ from .config import BuildConfig, GenConfig
 from .builder import DatasetBuilder
 from .quality_metrics import QualityConfig
 
+import os
 
 def _read_text_file(path: str) -> str:
     return open(path, "r", encoding="utf-8").read()
 
+def _first_local_path_from_dataset_spec(dataset_spec: str) -> Optional[str]:
+    """
+    humanize 需要一个可读的本地 json/jsonl 路径作为 few-shot pool。
+    这里从 --data 里尽量解析出第一个本地路径。
+    - 支持逗号分隔：取第一个
+    - 若不是本地文件（比如 HC3 spec），返回 None
+    """
+    if not dataset_spec:
+        return None
+    spec = str(dataset_spec).strip()
+    if not spec:
+        return None
+
+    # 逗号分隔 specs：只取第一个
+    if "," in spec:
+        spec = spec.split(",", 1)[0].strip()
+
+    # 只接受真实存在的文件（json/jsonl）
+    if os.path.isfile(spec):
+        return os.path.abspath(spec)
+
+    return None
+
+
+def _inject_humanize_attack_dataset(
+    attacks_config_path: Optional[str],
+    dataset_spec: str,
+    out_path: str,
+) -> Optional[str]:
+    """
+    若 attacks_config 里存在 humanize 攻击，但未提供 attack_dataset_path/dataset，
+    则自动注入 attack_dataset_path = abs(--data 的第一个本地文件路径)。
+
+    为避免污染原 attacks_config 文件：写一份派生配置到 out 同目录，并返回新路径。
+    """
+    if not attacks_config_path:
+        return attacks_config_path
+
+    try:
+        with open(attacks_config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        # 配置读不了就原样返回，让下游报错
+        return attacks_config_path
+
+    if not isinstance(cfg, dict):
+        return attacks_config_path
+
+    text_attacks = cfg.get("text_attacks", None)
+    if not isinstance(text_attacks, list) or not text_attacks:
+        return attacks_config_path
+
+    # humanize 的 type 兼容别名（与 factory 里的 alias 对齐/更宽松）
+    HUMANIZE_TYPES = {
+        "humanize", "humanization", "anthropomorphic", "personify", "persona"
+    }
+
+    changed = False
+    for item in text_attacks:
+        if not isinstance(item, dict):
+            continue
+        tp = str(item.get("type", "")).strip().lower()
+        if tp not in HUMANIZE_TYPES:
+            continue
+
+        # 已显式提供就不动
+        ds = item.get("attack_dataset_path", None)
+        if ds is None:
+            ds = item.get("dataset", None)
+        if ds is None:
+            ds = item.get("attack_dataset", None)
+        if ds is None:
+            ds = item.get("dataset_path", None)
+
+        if ds is not None and str(ds).strip():
+            continue
+
+        # 需要从 --data 推断
+        inferred = _first_local_path_from_dataset_spec(dataset_spec)
+        if not inferred:
+            raise ValueError(
+                "humanize attack requires `attack_dataset_path` (or `dataset`). "
+                "You asked to use --data as the pool, but --data is not a local file path.\n"
+                f"Got --data={dataset_spec}\n"
+                "Fix: set `attack_dataset_path` in attacks_config to a local json/jsonl file."
+            )
+
+        item["attack_dataset_path"] = inferred
+        changed = True
+
+    if not changed:
+        return attacks_config_path
+
+    # 写派生配置：放在 out 同目录，避免覆盖用户原始配置
+    out_p = Path(out_path)
+    new_path = out_p.with_name(out_p.stem + ".attacks_humanize_injected.json")
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(new_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+    return str(new_path)
 
 def _silence_hf_logs():
     import os
@@ -120,16 +222,16 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--api_timeout", type=int, default=120)
 
     # quality metrics
-    ap.add_argument("--metric_ppl", type=int, default=1, help="1: compute perplexity on original & samples")
+    ap.add_argument("--metric_ppl", type=int, default=0, help="1: compute perplexity on original & samples")
     ap.add_argument("--ppl_model", type=str, default="gpt2", help="HF causal LM for perplexity")
     ap.add_argument("--ppl_device", type=str, default="cuda:0")
     ap.add_argument("--ppl_dtype", type=str, default="auto", help="auto|float16|bfloat16|float32")
     ap.add_argument("--ppl_stride", type=int, default=256)
     ap.add_argument("--ppl_max_length", type=int, default=1024)
 
-    ap.add_argument("--metric_readability", type=int, default=1, help="1: compute readability for original & samples")
+    ap.add_argument("--metric_readability", type=int, default=0, help="1: compute readability for original & samples")
 
-    ap.add_argument("--metric_bertscore", type=int, default=1, help="1: compute BERTScore(original, sample)")
+    ap.add_argument("--metric_bertscore", type=int, default=0, help="1: compute BERTScore(original, sample)")
     ap.add_argument("--bertscore_model", type=str, default="roberta-large")
     ap.add_argument("--bertscore_device", type=str, default="cuda:0")
     ap.add_argument("--bertscore_lang", type=str, default="en")
@@ -168,8 +270,23 @@ def build_argparser() -> argparse.ArgumentParser:
 def _default_attack_item(tp: str) -> Dict[str, Any]:
     t = (tp or "").strip().lower()
 
+    # 更宽松的别名：允许用户输入 del/ins/sub/trans
+    alias = {
+        "del": "dele",
+        "delete": "dele",
+        "ins": "inse",
+        "insert": "inse",
+        "sub": "subs",
+        "subst": "subs",
+        "replace": "subs",
+        "trans": "tran",
+        "translate": "tran",
+    }
+    t = alias.get(t, t)
+
     if t in ("ptb", "span"):
         return {"type": "span"}
+
     if t in ("paraphrase", "para", "pegasus"):
         return {"type": "para", "backend": "pegasus"}
     if t in ("dipper",):
@@ -181,7 +298,7 @@ def _default_attack_item(tp: str) -> Dict[str, Any]:
     if t in ("chatgpt_para", "chatgpt"):
         return {"type": "para", "backend": "chatgpt"}
 
-    # typo + meta
+    # ✅ 关键：只有输入 typo 才是 typo 类；inse/dele/subs/tran 都是各自独立类别
     if t in ("typo", "inse", "dele", "subs", "tran"):
         return {"type": t}
 
@@ -200,7 +317,6 @@ def _default_attack_item(tp: str) -> Dict[str, Any]:
         return {"type": "back_trans", "pivot_lang": "de", "n_rounds": 1}
 
     raise ValueError(f"Unknown attack type: {tp}")
-
 
 def _collect_attack_types(args) -> List[str]:
     attack_types: List[str] = []
@@ -314,7 +430,12 @@ def main():
         prompt_from_label = 0
 
     attacks_config_path = _resolve_attacks_config_path(args)
-
+    # ✅ NEW: 如果 humanize 没写 attack_dataset_path，则默认用 --data
+    attacks_config_path = _inject_humanize_attack_dataset(
+        attacks_config_path=attacks_config_path,
+        dataset_spec=args.data,
+        out_path=args.out,
+    )
     # parse sample_k (None or <=0 => full)
     sample_k = args.sample_k
     if sample_k is not None:

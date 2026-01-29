@@ -142,15 +142,19 @@ def _flatten_original_sample_record(rec: Dict[str, Any]) -> Optional[List[Dict[s
     """
     展开形如:
       {"original": [...], "sample": [...], "sampled": [...], "rewritten": [...], <上下文...>}
-    为样本 [{text, label, split, ...}]：
+    为样本 [{text, label, split, ...}]。
+
+    默认行为：
       - original  → label = 0, split = "original"
       - sample    → label = 1, split = "sample"
       - sampled   → label = 1, split = "sampled"
       - rewritten → label = 1, split = "rewritten"
 
-    兼容 list 元素为：
-      - str
-      - {"text": "...", "id": "...", ...}  （会保留 id 及其余字段）
+    ✅ attack-only builder record（meta.attack_dataset_only=True）：
+      - 只输出 sample（label=1），忽略 original/prompt
+      - 支持 sample 内包含多个攻击变体（不会只留最后一个）
+      - 若 sample 中包含 src/base/original 之类“非攻击”项，会自动过滤
+      - attack 字段统一优先用 meta.active_attack（如 text_tran）；同时保留 attack_short（如 tran）
     """
     if not isinstance(rec, dict):
         return None
@@ -165,17 +169,14 @@ def _flatten_original_sample_record(rec: Dict[str, Any]) -> Optional[List[Dict[s
         if isinstance(lst, (list, tuple)):
             for x in lst:
                 if isinstance(x, dict):
-                    # 最低要求：必须能拿到 text
                     if "text" in x and isinstance(x["text"], str):
                         t = x["text"].strip()
                         if not t:
                             continue
-                        # 保留除 label/split 之外所有字段（防止污染我们后续写入的 label/split）
                         item = {k: v for k, v in x.items() if k not in ("label", "split")}
                         item["text"] = t
                         out.append(item)
                     else:
-                        # dict 但没有 text，就忽略
                         continue
                 else:
                     t = str(x).strip()
@@ -183,6 +184,106 @@ def _flatten_original_sample_record(rec: Dict[str, Any]) -> Optional[List[Dict[s
                         out.append({"text": t})
         return out
 
+    # -------------------------
+    # attack-only special case
+    # -------------------------
+    meta = rec.get("meta", None)
+    meta = meta if isinstance(meta, dict) else {}
+
+    is_attack_only = bool(meta.get("attack_dataset_only", False))
+    if not is_attack_only:
+        b = str(meta.get("builder", "") or "").strip().lower()
+        if b.endswith("dataset_attack_only") or ("attack_only" in b):
+            is_attack_only = True
+
+    if is_attack_only:
+        sam_items = _to_item_list(rec.get("sample", []))
+        if not sam_items:
+            return None
+
+        # 过滤掉 src/base/original 这种“非攻击项”
+        filtered: List[Dict[str, Any]] = []
+        for it in sam_items:
+            atk = str(it.get("attack") or it.get("aug_method") or "").strip().lower()
+            role = str(it.get("role") or "").strip().lower()
+            if atk in ("src", "source", "base", "orig", "original") or role in ("src", "source", "base", "orig", "original"):
+                continue
+            filtered.append(it)
+        if filtered:
+            sam_items = filtered
+
+        base_id = rec.get("id", None)
+        base_id = str(base_id) if base_id is not None else ""
+
+        # 只保留关键 ctx 字段
+        ctx_keep_keys = ("lang", "model", "source")
+        ctx: Dict[str, Any] = {}
+        for k in ctx_keep_keys:
+            if k in rec and rec.get(k, None) is not None and str(rec.get(k)).strip() != "":
+                ctx[k] = rec.get(k)
+
+        active_attack = meta.get("active_attack", None)
+        active_attack_s = str(active_attack).strip() if active_attack is not None else ""
+
+        # 用于判断是否是“文本攻击家族”，决定是否补 text_ 前缀
+        has_text_attack_meta = isinstance(meta.get("text_attack_meta", None), list)
+
+        out: List[Dict[str, Any]] = []
+        for it in sam_items:
+            text = it.get("text", "")
+            if not isinstance(text, str) or not text.strip():
+                continue
+
+            # id：优先用 sample item 的 id（避免同 base 的多条样本冲突）
+            sid = it.get("id", None)
+            ex_id = str(sid) if sid is not None and str(sid).strip() != "" else base_id
+
+            lang = it.get("lang", None) or ctx.get("lang", None)
+            model = it.get("model", None) or ctx.get("model", None)
+            source = rec.get("source", None) or ctx.get("source", None)
+
+            attack_short = it.get("attack", None) or it.get("aug_method", None) or it.get("attack_method", None) or it.get("attack_type", None)
+            attack_short_s = str(attack_short).strip() if attack_short is not None else ""
+
+            # ✅ 统一 attack 名：优先用 meta.active_attack（例如 text_tran / text_form_zero-sp）
+            attack = ""
+            if active_attack_s:
+                attack = active_attack_s
+            elif attack_short_s:
+                # 没有 active_attack 时，尽量补齐成 text_*
+                if has_text_attack_meta and not attack_short_s.startswith("text_"):
+                    attack = "text_" + attack_short_s
+                else:
+                    attack = attack_short_s
+
+            ex: Dict[str, Any] = {
+                "id": ex_id,
+                "base_id": base_id,
+                "text": text.strip(),
+                "label": 1,
+                "split": "attack",
+            }
+
+            if lang is not None and str(lang).strip() != "":
+                ex["lang"] = lang
+            if model is not None and str(model).strip() != "":
+                ex["model"] = model
+            if source is not None and str(source).strip() != "":
+                ex["source"] = source
+
+            if attack:
+                ex["attack"] = attack
+            # 同时保留短名，方便你需要时按 tran/subs 这种粒度统计
+            if attack_short_s and (not attack or attack_short_s != attack):
+                ex["attack_short"] = attack_short_s
+
+            out.append(ex)
+
+        return out if out else None
+
+    # -------------------------
+    # default behavior
+    # -------------------------
     ctx = {k: v for k, v in rec.items() if k not in ("original", "sample", "sampled", "rewritten")}
 
     ori_items = _to_item_list(rec.get("original", []))
@@ -190,12 +291,12 @@ def _flatten_original_sample_record(rec: Dict[str, Any]) -> Optional[List[Dict[s
     sampled_items = _to_item_list(rec.get("sampled", []))
     rewrite_items = _to_item_list(rec.get("rewritten", []))
 
-    out: List[Dict[str, Any]] = []
-    out += [{**ctx, **it, "label": 0, "split": "original"} for it in ori_items]
-    out += [{**ctx, **it, "label": 1, "split": "sample"} for it in sam_items]
-    out += [{**ctx, **it, "label": 1, "split": "sampled"} for it in sampled_items]
-    out += [{**ctx, **it, "label": 1, "split": "rewritten"} for it in rewrite_items]
-    return out
+    out2: List[Dict[str, Any]] = []
+    out2 += [{**ctx, **it, "label": 0, "split": "original"} for it in ori_items]
+    out2 += [{**ctx, **it, "label": 1, "split": "sample"} for it in sam_items]
+    out2 += [{**ctx, **it, "label": 1, "split": "sampled"} for it in sampled_items]
+    out2 += [{**ctx, **it, "label": 1, "split": "rewritten"} for it in rewrite_items]
+    return out2
 
 # ---------------------------
 # HC3 专用展开（成对最小平衡）
@@ -317,8 +418,8 @@ def _balanced_sample_two_class(examples: List[Dict[str, Any]],
 # ---------------------------
 # 自动分组列探测
 # ---------------------------
-_DEFAULT_GROUP_CANDIDATES = ["id", "qid", "question_id", "question",
-                             "lang", "source", "model", "sub_source", "split"]
+_DEFAULT_GROUP_CANDIDATES = ["id", "base_id", "qid", "question_id", "question",
+                             "lang", "source", "model", "sub_source", "attack", "split"]
 
 def _auto_group_cols(examples: List[Dict[str, Any]],
                      candidates: Sequence[str] = _DEFAULT_GROUP_CANDIDATES) -> List[str]:

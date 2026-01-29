@@ -726,10 +726,15 @@ class PerturbationT5Attack:
 @dataclass
 class PegasusParaphraseAttack:
     model_name: str = "tuner007/pegasus_paraphrase"
-    top_p: float = 0.96
-    temperature: float = 1.0
+    # ✅ 对齐官方示例的关键参数
+    num_beams: int = 10
+    num_return_sequences: int = 1  # 需要多样性就设成 5/10
+    do_sample: bool = False        # 官方示例等价于 False
+    temperature: float = 1.5       # do_sample=False 时基本不生效，但保留
+
+    top_p: float = 0.96            # do_sample=True 时才用
     no_repeat_ngram_size: int = 3
-    max_length: int = 60      # per-sentence (like your original)
+    max_length: int = 60
     sent_batch_size: int = 64
     n_variants: int = 1
     device: str = "cuda"
@@ -774,8 +779,8 @@ class PegasusParaphraseAttack:
         return _HF_MODEL_CACHE[model_key], tokenizer
 
     def apply(self, text: str, rng, meta: Optional[Dict[str, Any]] = None) -> List[str]:
-        text = text or ""
-        if not text.strip():
+        text = (text or "").strip()
+        if not text:
             return []
         model, tok = self._load()
 
@@ -784,33 +789,80 @@ class PegasusParaphraseAttack:
             return []
 
         outs: List[str] = []
+        import torch
+        def _pegasus_max_dec_len(model) -> int:
+            # Pegasus learned pos embedding 通常有 offset（类似 Bart 为 2）
+            max_pos = int(getattr(model.config, "max_position_embeddings", 1024))
+            offset = 0
+            try:
+                offset = int(getattr(model.model.decoder.embed_positions, "offset", 0))
+            except Exception:
+                offset = 0
+            # 预留 1 个位置给安全边界
+            return max(8, max_pos - offset - 1)
+
+        max_dec_len = _pegasus_max_dec_len(model)
+
+        # 你原来的 self.max_length 可能来自 attacks_para.json，必须 clamp
+        safe_max_len = min(int(self.max_length), max_dec_len)
         for _ in range(self.n_variants):
-            # paraphrase all sentences, then join
             para_sents: List[str] = []
-            # batched generation
+
             for i in range(0, len(sents), int(self.sent_batch_size)):
                 batch_sents = sents[i : i + int(self.sent_batch_size)]
                 batch = tok(
                     batch_sents,
                     truncation=True,
                     padding="longest",
-                    return_tensors="pt",
                     max_length=int(self.max_length),
+                    return_tensors="pt",
                 ).to(self.device)
 
-                import torch
-                with torch.inference_mode():
-                    out_ids = model.generate(
-                        **batch,
-                        max_length=int(self.max_length),
+                gen_kwargs = dict(
+                    max_length=int(self.max_length),
+                    num_beams=int(self.num_beams),
+                    num_return_sequences=int(self.num_return_sequences),
+                    no_repeat_ngram_size=int(self.no_repeat_ngram_size),
+                    do_sample=bool(self.do_sample),
+                )
+                if self.do_sample:
+                    gen_kwargs.update(dict(
                         temperature=float(self.temperature),
                         top_p=float(self.top_p),
-                        no_repeat_ngram_size=int(self.no_repeat_ngram_size),
-                        do_sample=True,
-                    )
-                para_sents.extend(tok.batch_decode(out_ids, skip_special_tokens=True))
+                    ))
 
-            out = " ".join([x.strip() for x in para_sents if x.strip()]).strip()
+                with torch.inference_mode():
+                    pos = model.model.decoder.embed_positions
+
+                    out_ids = model.generate(
+                        **batch,
+                        max_length=safe_max_len,
+                        do_sample=True,
+                        top_p=float(self.top_p),
+                        temperature=float(self.temperature),
+                        num_beams=1,
+                        num_return_sequences=1,
+                        no_repeat_ngram_size=int(self.no_repeat_ngram_size),
+                        eos_token_id=model.config.eos_token_id,
+                    )
+
+                decoded = tok.batch_decode(out_ids, skip_special_tokens=True)
+
+                # ✅ 把 (B * K) 展开结果按句子分组，每句选一个
+                K = int(self.num_return_sequences)
+                if K <= 1:
+                    para_sents.extend([x.strip() for x in decoded])
+                else:
+                    for b in range(len(batch_sents)):
+                        cands = [decoded[b*K + k].strip() for k in range(K)]
+                        cands = [c for c in cands if c]
+                        if not cands:
+                            para_sents.append(batch_sents[b].strip())
+                        else:
+                            j = _rng_randint(rng, 0, len(cands))
+                            para_sents.append(cands[j])
+
+            out = " ".join([x for x in para_sents if x]).strip()
             if out and out != text:
                 outs.append(out)
 
@@ -961,7 +1013,8 @@ class HFPromptParaphraseAttack:
     dtype: str = "bf16"
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     name: str = "para"
-
+    plain_for_seq2seq: bool = True   # ✅ 新增：seq2seq 默认不加 system/instruction
+    seq2seq_prefix: str = ""         # 可选：比如 "paraphrase: " 给 T5 用，Pegasus 置空
     _model: Any = field(default=None, init=False, repr=False)
     _tok: Any = field(default=None, init=False, repr=False)
     _is_seq2seq: bool = field(default=False, init=False, repr=False)
@@ -994,6 +1047,7 @@ class HFPromptParaphraseAttack:
                 self.model_name_or_path,
                 cache_dir=self.cache_dir,
                 torch_dtype=torch_dtype,
+                weights_only=False,   # ✅ 关键：兼容旧式 tar/pickle 权重
             )
             self._is_seq2seq = False
 
@@ -1013,31 +1067,23 @@ class HFPromptParaphraseAttack:
         outs: List[str] = []
         import torch
         for _ in range(self.n_variants):
-            prompt = f"{self.system_prompt}\n\n{DEFAULT_USER_INSTRUCTION}{text}\n"
-            if self._is_seq2seq:
-                enc = self._tok([prompt], return_tensors="pt", truncation=True, padding=True).to(self.device)
-                with torch.inference_mode():
-                    out_ids = self._model.generate(
-                        **enc,
-                        max_new_tokens=int(self.max_new_tokens),
-                        do_sample=bool(self.do_sample),
-                        temperature=float(self.temperature),
-                        top_p=float(self.top_p),
-                    )
-                out = self._tok.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
+            # ✅ 关键修复：Pegasus/T5 这类 seq2seq，默认直接输入原文（最多加个简短 prefix）
+            if self._is_seq2seq and self.plain_for_seq2seq:
+                prompt = f"{self.seq2seq_prefix}{text}"
             else:
-                enc = self._tok([prompt], return_tensors="pt", truncation=True, padding=True).to(self.device)
-                with torch.inference_mode():
-                    out_ids = self._model.generate(
-                        **enc,
-                        max_new_tokens=int(self.max_new_tokens),
-                        do_sample=bool(self.do_sample),
-                        temperature=float(self.temperature),
-                        top_p=float(self.top_p),
-                        pad_token_id=int(self._tok.pad_token_id),
-                    )
-                full = self._tok.batch_decode(out_ids, skip_special_tokens=True)[0]
-                out = full[len(prompt):].strip() if full.startswith(prompt) else full.strip()
+                prompt = f"{self.system_prompt}\n\n{DEFAULT_USER_INSTRUCTION}{text}\n"
+
+            enc = self._tok([prompt], return_tensors="pt", truncation=True, padding=True).to(self.device)
+
+            with torch.inference_mode():
+                out_ids = self._model.generate(
+                    **enc,
+                    max_new_tokens=int(self.max_new_tokens),
+                    do_sample=bool(self.do_sample),
+                    temperature=float(self.temperature),
+                    top_p=float(self.top_p),
+                )
+            out = self._tok.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
 
             if out and out != text:
                 outs.append(out)
@@ -1363,4 +1409,527 @@ class BackTranslationAttack:
                 cur = back
             if cur and cur != text:
                 outs.append(cur)
+        return _dedup_strs(outs)
+
+
+# =======================
+# Humanization Attack (拟人化攻击)
+# =======================
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+import os
+import json
+import time
+
+_HUMANIZE_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
+
+def _read_json_or_jsonl(path: str) -> List[Dict[str, Any]]:
+    path = str(path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Humanize attack dataset not found: {path}")
+    if path.lower().endswith(".jsonl"):
+        rows: List[Dict[str, Any]] = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        rows.append(obj)
+                except Exception:
+                    continue
+        return rows
+    else:
+        obj = json.load(open(path, "r", encoding="utf-8"))
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+        if isinstance(obj, dict) and "data" in obj and isinstance(obj["data"], list):
+            return [x for x in obj["data"] if isinstance(x, dict)]
+        return []
+
+def _extract_text_from_row(row: Dict[str, Any]) -> str:
+    # 兼容常见字段：text / content / sentence / original / sample ...
+    for k in ("text", "content", "sentence", "doc", "article"):
+        v = row.get(k, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    # 兼容你之前的一些结构：original / sample 可能是 list[dict]
+    for k in ("original", "sample"):
+        v = row.get(k, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, list) and v:
+            # 找第一条有 text 的
+            for it in v:
+                if isinstance(it, dict) and isinstance(it.get("text", None), str) and it["text"].strip():
+                    return it["text"].strip()
+
+    return ""
+
+def _is_machine_row(row: Dict[str, Any]) -> Optional[bool]:
+    """
+    尽量兼容 label 命名：
+      - label / y / orig_label: 0 human, 1 machine
+      - label_str: "human"/"machine"/"ai"/"mgt"
+      - is_machine / is_human
+    返回：
+      True=machine, False=human, None=无法判断
+    """
+    for k in ("is_machine", "machine", "ai_generated"):
+        v = row.get(k, None)
+        if isinstance(v, bool):
+            return bool(v)
+        if isinstance(v, (int, float)) and v in (0, 1):
+            return bool(int(v))
+
+    v = row.get("is_human", None)
+    if isinstance(v, bool):
+        return (not v)
+
+    for k in ("label", "y", "orig_label", "gold", "target"):
+        v = row.get(k, None)
+        if isinstance(v, (int, float)):
+            if int(v) == 1:
+                return True
+            if int(v) == 0:
+                return False
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "machine", "mgt", "ai", "aigen", "generated", "llm"):
+                return True
+            if s in ("0", "human", "humanwritten", "human_written"):
+                return False
+
+    v = row.get("label_str", None)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("machine", "mgt", "ai", "generated", "llm"):
+            return True
+        if s in ("human", "human_written"):
+            return False
+
+    return None
+
+def _load_humanize_pool(dataset_path: str) -> Tuple[List[str], List[str]]:
+    """
+    返回 (human_texts, machine_texts)，并带 mtime 缓存。
+    """
+    dataset_path = os.path.abspath(dataset_path)
+    mtime = os.path.getmtime(dataset_path)
+
+    cached = _HUMANIZE_DATA_CACHE.get(dataset_path, None)
+    if cached is not None and cached.get("mtime", None) == mtime:
+        return cached["human"], cached["machine"]
+
+    rows = _read_json_or_jsonl(dataset_path)
+    human: List[str] = []
+    machine: List[str] = []
+
+    for r in rows:
+        txt = _extract_text_from_row(r)
+        if not txt:
+            continue
+        lab = _is_machine_row(r)
+        if lab is True:
+            machine.append(txt)
+        elif lab is False:
+            human.append(txt)
+        else:
+            # 无法判断：默认当作 machine（更贴近“攻击数据集”用途）
+            machine.append(txt)
+
+    human = _dedup_strs([x.strip() for x in human if x.strip()])
+    machine = _dedup_strs([x.strip() for x in machine if x.strip()])
+
+    _HUMANIZE_DATA_CACHE[dataset_path] = {"mtime": mtime, "human": human, "machine": machine}
+    return human, machine
+
+def _estimate_tokens_rough(s: str) -> int:
+    # 粗略：英文/混合文本约 4 chars/token；中文更密但也能作为上界近似
+    s = s or ""
+    return max(1, int(len(s) / 4))
+
+def _truncate_by_token_budget_rough(s: str, max_tokens: int) -> str:
+    # 粗略截断：按字符比例缩放
+    s = s or ""
+    if max_tokens <= 0:
+        return ""
+    if _estimate_tokens_rough(s) <= max_tokens:
+        return s
+    # 估计：token≈len/4 => len≈max_tokens*4
+    max_chars = max(8, int(max_tokens * 4))
+    return s[:max_chars].rstrip()
+
+def _sample_texts(rng, xs: List[str], k: int) -> List[str]:
+    if not xs or k <= 0:
+        return []
+    if k >= len(xs):
+        # 无放回不足时：直接打乱取全量
+        idx = _rng_sample_no_replace(rng, len(xs), len(xs))
+        return [xs[i] for i in idx]
+    idx = _rng_sample_no_replace(rng, len(xs), k)
+    return [xs[i] for i in idx]
+
+_HUMANIZE_SYSTEM = (
+    "You are an expert human writer and editor.\n"
+    "Your task is to rewrite the given MACHINE-GENERATED text so that it is indistinguishable from HUMAN-WRITTEN text.\n"
+    "Strict rules:\n"
+    "1) Preserve the original meaning and factual content.\n"
+    "2) Keep the SAME LANGUAGE as the input.\n"
+    "3) Do NOT add new facts, citations, disclaimers, or meta commentary.\n"
+    "4) Output ONLY the rewritten text.\n"
+)
+
+def _build_humanize_user_prompt(
+    target_text: str,
+    *,
+    human_examples: List[str],
+    machine_examples: List[str],
+    n_pairs: int,
+    max_input_tokens: int,
+) -> str:
+    """
+    构造 few-shot 对比提示词，并做粗略 token budget 控制（默认 4096）。
+    """
+    target_text = (target_text or "").strip()
+    if not target_text:
+        return ""
+
+    # 预留：系统消息也会占 token，这里简单保守一点
+    budget = int(max(256, max_input_tokens - 512))
+
+    # 先截断 target，避免极端长文本撑爆输入
+    target = _truncate_by_token_budget_rough(target_text, int(budget * 0.50))
+
+    parts: List[str] = []
+    parts.append(
+        "Below are style references.\n"
+        "Imitate the HUMAN writing style and avoid the MACHINE style.\n"
+    )
+
+    # 若有人类样本：提供 paired 对比；否则按你要求：不提供 human 段
+    if human_examples:
+        parts.append("== Human-written examples (imitate these) ==\n")
+        for i, ex in enumerate(human_examples[: max(0, n_pairs)], start=1):
+            ex2 = _truncate_by_token_budget_rough(ex.strip(), 220)
+            parts.append(f"[H{i}]\n{ex2}\n")
+
+    parts.append("== Machine-generated examples (avoid these patterns) ==\n")
+    for i, ex in enumerate(machine_examples[: max(0, n_pairs)], start=1):
+        ex2 = _truncate_by_token_budget_rough(ex.strip(), 220)
+        parts.append(f"[M{i}]\n{ex2}\n")
+
+    parts.append(
+        "== Target text to rewrite (machine-generated) ==\n"
+        f"{target}\n\n"
+        "Rewrite the target text to sound human-written. Output only the rewritten text."
+    )
+
+    # 预算控制：若超预算，优先减少 examples，其次截断 target
+    def _joined(p: List[str]) -> str:
+        return "\n".join(p).strip() + "\n"
+
+    cur = _joined(parts)
+    if _estimate_tokens_rough(cur) <= budget:
+        return cur
+
+    # 先砍 examples：逐步减少 n_pairs
+    for k in range(n_pairs - 1, -1, -1):
+        tmp_parts: List[str] = []
+        tmp_parts.append(parts[0])  # intro
+
+        if human_examples:
+            tmp_parts.append("== Human-written examples (imitate these) ==\n")
+            for i, ex in enumerate(human_examples[:k], start=1):
+                tmp_parts.append(f"[H{i}]\n{_truncate_by_token_budget_rough(ex.strip(), 220)}\n")
+
+        tmp_parts.append("== Machine-generated examples (avoid these patterns) ==\n")
+        for i, ex in enumerate(machine_examples[:k], start=1):
+            tmp_parts.append(f"[M{i}]\n{_truncate_by_token_budget_rough(ex.strip(), 220)}\n")
+
+        tmp_parts.append(
+            "== Target text to rewrite (machine-generated) ==\n"
+            f"{target}\n\n"
+            "Rewrite the target text to sound human-written. Output only the rewritten text."
+        )
+        cur2 = _joined(tmp_parts)
+        if _estimate_tokens_rough(cur2) <= budget:
+            return cur2
+
+    # 还超：继续截断 target
+    target2 = _truncate_by_token_budget_rough(target, int(budget * 0.25))
+    minimal = (
+        "Imitate HUMAN writing style and avoid MACHINE style.\n"
+        "== Target text to rewrite (machine-generated) ==\n"
+        f"{target2}\n\n"
+        "Rewrite the target text to sound human-written. Output only the rewritten text.\n"
+    )
+    return minimal
+
+# -----------------------
+# Humanize - API backend (OpenAI-compatible)
+# -----------------------
+@dataclass
+class HumanizeAttackAPI:
+    """
+    拟人化攻击（API 版）：从 attack_dataset_path 抽 few-shot 示例，调用 OpenAI-compatible Instruct LLM 重写。
+    """
+    attack_dataset_path: str
+
+    model: str = "deepseek-chat"
+    base_url: str = "https://api.deepseek.com"
+    api_key: str = ""
+
+    n_pairs: int = 3
+    max_input_tokens: int = 4096
+    max_output_tokens: int = 512
+
+    temperature: float = 0.9
+    top_p: float = 0.95
+    top_k: Optional[int] = None  # 通过 extra_body 尝试透传（不保证所有服务端支持）
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+
+    timeout: float = 60.0
+    retries: int = 5
+    sleep: float = 0.2
+    n_variants: int = 1
+
+    name: str = "humanize"
+    _client: Any = field(default=None, init=False, repr=False)
+
+    def _client_init(self):
+        if self._client is not None:
+            return
+        key = self.api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+        if not key:
+            raise RuntimeError("HumanizeAttackAPI: API key empty. Set api_key or env DEEPSEEK_API_KEY/OPENAI_API_KEY.")
+        try:
+            from openai import OpenAI  # type: ignore
+        except Exception as e:
+            raise RuntimeError("HumanizeAttackAPI requires `pip install openai` (OpenAI python>=1.x).") from e
+        self._client = OpenAI(api_key=key, base_url=self.base_url)
+
+    def _once(self, user_prompt: str) -> str:
+        self._client_init()
+
+        kwargs = dict(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": _HUMANIZE_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=False,
+            temperature=float(self.temperature),
+            top_p=float(self.top_p),
+            max_tokens=int(self.max_output_tokens),
+            timeout=float(self.timeout),
+            frequency_penalty=float(self.frequency_penalty),
+            presence_penalty=float(self.presence_penalty),
+        )
+
+        # 尝试透传 top_k（若服务端/SDK 不支持，会 TypeError -> 兜底重试）
+        if self.top_k is not None:
+            kwargs["extra_body"] = {"top_k": int(self.top_k)}  # 兼容部分 OpenAI-compatible server
+
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except TypeError:
+            kwargs.pop("extra_body", None)
+            resp = self._client.chat.completions.create(**kwargs)
+
+        return (resp.choices[0].message.content or "").strip()
+
+    def _with_retry(self, user_prompt: str) -> str:
+        self._client_init()
+        delay = 1.0
+        backoff = 1.5
+        last: Optional[Exception] = None
+        try:
+            from openai import APIError, RateLimitError, APITimeoutError, InternalServerError  # type: ignore
+            retryable = (RateLimitError, APITimeoutError, InternalServerError, APIError)
+        except Exception:
+            retryable = (Exception,)
+
+        for _ in range(int(self.retries)):
+            try:
+                return self._once(user_prompt)
+            except retryable as e:  # type: ignore
+                last = e
+                time.sleep(delay)
+                delay *= backoff
+            except Exception as e:
+                last = e
+                time.sleep(delay)
+                delay *= backoff
+
+        # 失败则回退为原文（避免 pipeline 崩）
+        return ""
+
+    def apply(self, text: str, rng, meta: Optional[Dict[str, Any]] = None) -> List[str]:
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        human_pool, machine_pool = _load_humanize_pool(self.attack_dataset_path)
+        if not machine_pool and not human_pool:
+            return []
+
+        # 抽样策略：若有人类样本，则 paired 数 = min(n_pairs, |H|, |M|)
+        # 若无人类样本，则只抽 machine examples，数量 = min(n_pairs, |M|)
+        if human_pool and machine_pool:
+            k = max(0, min(int(self.n_pairs), len(human_pool), len(machine_pool)))
+            humans = _sample_texts(rng, human_pool, k)
+            machines = _sample_texts(rng, machine_pool, k)
+        else:
+            k = max(0, min(int(self.n_pairs), len(machine_pool)))
+            humans = []
+            machines = _sample_texts(rng, machine_pool, k)
+
+        user_prompt = _build_humanize_user_prompt(
+            text,
+            human_examples=humans,
+            machine_examples=machines,
+            n_pairs=int(self.n_pairs),
+            max_input_tokens=int(self.max_input_tokens),
+        )
+        if not user_prompt.strip():
+            return []
+
+        outs: List[str] = []
+        for _ in range(int(self.n_variants)):
+            out = self._with_retry(user_prompt)
+            if self.sleep and self.sleep > 0:
+                time.sleep(float(self.sleep))
+            if out and out != text:
+                outs.append(out)
+
+        return _dedup_strs(outs)
+
+# -----------------------
+# Humanize - HF backend (local instruct LLM)
+# -----------------------
+@dataclass
+class HumanizeAttackHF:
+    """
+    拟人化攻击（本地 HF 版）：适合你在集群上用 Llama/Gemma Instruct 跑离线攻击。
+    """
+    attack_dataset_path: str
+    model_name_or_path: str
+
+    n_pairs: int = 3
+    max_input_tokens: int = 4096
+    max_output_tokens: int = 512
+
+    temperature: float = 0.9
+    top_p: float = 0.95
+    top_k: Optional[int] = 50
+    do_sample: bool = True
+
+    device: str = "cuda"
+    cache_dir: Optional[str] = None
+    dtype: str = "bf16"
+    n_variants: int = 1
+
+    name: str = "humanize"
+    _model: Any = field(default=None, init=False, repr=False)
+    _tok: Any = field(default=None, init=False, repr=False)
+
+    def _load(self):
+        if self._model is not None and self._tok is not None:
+            return
+        import transformers
+        import torch
+        cd = _resolve_hf_cache_dir(self.cache_dir)
+        self._tok = transformers.AutoTokenizer.from_pretrained(self.model_name_or_path, cache_dir=cd, use_fast=True)
+
+        torch_dtype = _get_torch_dtype(self.dtype)
+        self._model = transformers.AutoModelForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            cache_dir=cd,
+            torch_dtype=torch_dtype,
+            weights_only=False,  # 兼容旧 checkpoint
+        ).to(self.device)
+        self._model.eval()
+
+        if getattr(self._tok, "pad_token_id", None) is None and getattr(self._tok, "eos_token_id", None) is not None:
+            self._tok.pad_token = self._tok.eos_token
+
+    def _format_prompt(self, user_prompt: str) -> str:
+        """
+        尽量走 chat_template（对 Instruct 模型效果通常更稳），否则退化为纯拼接。
+        """
+        tok = self._tok
+        if hasattr(tok, "apply_chat_template"):
+            try:
+                msgs = [
+                    {"role": "system", "content": _HUMANIZE_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ]
+                return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+            except Exception:
+                pass
+        return f"{_HUMANIZE_SYSTEM}\n\n{user_prompt}\n"
+
+    def apply(self, text: str, rng, meta: Optional[Dict[str, Any]] = None) -> List[str]:
+        text = (text or "").strip()
+        if not text:
+            return []
+        self._load()
+
+        human_pool, machine_pool = _load_humanize_pool(self.attack_dataset_path)
+        if not machine_pool and not human_pool:
+            return []
+
+        if human_pool and machine_pool:
+            k = max(0, min(int(self.n_pairs), len(human_pool), len(machine_pool)))
+            humans = _sample_texts(rng, human_pool, k)
+            machines = _sample_texts(rng, machine_pool, k)
+        else:
+            k = max(0, min(int(self.n_pairs), len(machine_pool)))
+            humans = []
+            machines = _sample_texts(rng, machine_pool, k)
+
+        user_prompt = _build_humanize_user_prompt(
+            text,
+            human_examples=humans,
+            machine_examples=machines,
+            n_pairs=int(self.n_pairs),
+            max_input_tokens=int(self.max_input_tokens),
+        )
+        if not user_prompt.strip():
+            return []
+
+        prompt = self._format_prompt(user_prompt)
+
+        # 这里不再依赖 tokenizer 的 truncation（会截掉尾部 target），而是依赖上面的预算控制
+        import torch
+        tok = self._tok
+        enc = tok([prompt], return_tensors="pt", truncation=False, padding=True).to(self.device)
+
+        gen_kwargs = dict(
+            max_new_tokens=int(self.max_output_tokens),
+            do_sample=bool(self.do_sample),
+            temperature=float(self.temperature),
+            top_p=float(self.top_p),
+        )
+        if self.top_k is not None:
+            gen_kwargs["top_k"] = int(self.top_k)
+
+        outs: List[str] = []
+        for _ in range(int(self.n_variants)):
+            with torch.inference_mode():
+                out_ids = self._model.generate(**enc, **gen_kwargs)
+            out = tok.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
+
+            # 某些 chat 模型会把 prompt 一起解码出来；做一个简单剥离（保守处理）
+            if out.startswith(prompt.strip()):
+                out = out[len(prompt.strip()):].strip()
+
+            if out and out != text:
+                outs.append(out)
+
         return _dedup_strs(outs)

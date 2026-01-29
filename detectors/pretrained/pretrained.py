@@ -258,6 +258,36 @@ def _load_state_dict(ckpt_path: str, device: str = "cpu"):
     return new_sd
 
 
+def _find_detective_train_args(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    base = path if os.path.isdir(path) else os.path.dirname(path)
+    for _ in range(3):
+        cand = os.path.join(base, "train_args.json")
+        if os.path.isfile(cand):
+            return cand
+        parent = os.path.dirname(base)
+        if parent == base:
+            break
+        base = parent
+    return None
+
+
+def _read_detective_embedding_model(path: Optional[str]) -> Optional[str]:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    args = payload.get("args", {}) if isinstance(payload, dict) else {}
+    model = args.get("embedding_model")
+    if not model:
+        return None
+    return str(model)
+
+
 def _from_pretrained_safe(factory, model_id_or_path: str, **kwargs):
     """
     统一安全加载：
@@ -440,15 +470,14 @@ class TextEmbeddingModel(torch.nn.Module):
         else:
             out = self.model(**encoded_batch)
 
-        if 'bge' in self.model_name.lower() or 'mxbai' in self.model_name.lower():
-            use_pooling = 'cls'
+        if "bge" in self.model_name.lower() or "mxbai" in self.model_name.lower():
+            use_pooling = "cls"
 
         if isinstance(out, tuple):
             out = out[0]
         if isinstance(out, dict):
             if hidden_states:
-                hs = torch.stack(out["hidden_states"], dim=0)
-                feat = hs
+                feat = torch.stack(out["hidden_states"], dim=0)
             else:
                 feat = out["last_hidden_state"]
         else:
@@ -457,6 +486,58 @@ class TextEmbeddingModel(torch.nn.Module):
         emb = self._pooling(feat, encoded_batch["attention_mask"], use_pooling, hidden_states)
         emb = torch.nn.functional.normalize(emb, dim=-1)
         return emb
+
+
+class _DetectiveClassificationHead(torch.nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.dense1 = torch.nn.Linear(in_dim, in_dim // 4)
+        self.dense2 = torch.nn.Linear(in_dim // 4, in_dim // 16)
+        self.out_proj = torch.nn.Linear(in_dim // 16, out_dim)
+
+        torch.nn.init.xavier_uniform_(self.dense1.weight)
+        torch.nn.init.xavier_uniform_(self.dense2.weight)
+        torch.nn.init.xavier_uniform_(self.out_proj.weight)
+        torch.nn.init.normal_(self.dense1.bias, std=1e-6)
+        torch.nn.init.normal_(self.dense2.bias, std=1e-6)
+        torch.nn.init.normal_(self.out_proj.bias, std=1e-6)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.tanh(self.dense1(x))
+        x = torch.tanh(self.dense2(x))
+        return self.out_proj(x)
+
+
+class _MinimalDetectiveClassifier(torch.nn.Module):
+    """
+    兼容当前 detective.py 的分类器命名（model + classifier.*）。
+    用于没有 encoder_hf 目录时的推理加载。
+    """
+    def __init__(self, encoder_name: str, proj_dim: int, classifier_dim: int = 2):
+        super().__init__()
+        self.model = TextEmbeddingModel(encoder_name)
+        self.classifier = _DetectiveClassificationHead(proj_dim, classifier_dim)
+
+    def get_encoder(self) -> TextEmbeddingModel:
+        return self.model
+
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        batch = {"input_ids": input_ids, "attention_mask": attention_mask}
+        return self.model(batch)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoded_batch: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        if encoded_batch is None:
+            if input_ids is None or attention_mask is None:
+                raise ValueError("input_ids/attention_mask or encoded_batch must be provided.")
+            encoded_batch = {"input_ids": input_ids, "attention_mask": attention_mask}
+        z = self.model(encoded_batch)
+        logits = self.classifier(z)
+        return {"z": z, "logits_label": logits}
 
 
 # ================== 简易指标（与 utils.compute_metrics 等价接口） ==================
@@ -771,6 +852,19 @@ class PretrainedDetector(DetectorBase):
         detective_dir = self._is_detective_dir(self.model_path)
         if detective_dir is not None:
             enc_dir = os.path.join(detective_dir, "encoder_hf")
+            if not os.path.isdir(enc_dir):
+                parent_enc = os.path.join(os.path.dirname(detective_dir), "encoder_hf")
+                if os.path.isdir(parent_enc):
+                    enc_dir = parent_enc
+            if not os.path.isdir(enc_dir):
+                args_path = _find_detective_train_args(detective_dir)
+                embed_model = _read_detective_embedding_model(args_path)
+                if embed_model:
+                    enc_dir = embed_model
+                else:
+                    raise RuntimeError(
+                        "[pretrained/DeTeCtive] 未找到 encoder_hf，且 train_args.json 中缺少 embedding_model。"
+                    )
             ckpt_path = (
                 os.path.join(detective_dir, "model_classifier_best.pth")
                 if os.path.isfile(os.path.join(detective_dir, "model_classifier_best.pth"))
@@ -782,25 +876,35 @@ class PretrainedDetector(DetectorBase):
                 )
 
             sd = _load_state_dict(ckpt_path, device="cpu")
-            if "cls_label.weight" not in sd:
-                raise RuntimeError("[pretrained/DeTeCtive] 权重中缺少 cls_label.weight，无法恢复分类器。")
-            proj_dim = int(sd["cls_label.weight"].shape[1])
-
-            if _SimCLR_MultiLevel is not None:
-                mdl = _SimCLR_MultiLevel(
-                    base_name=enc_dir,
-                    proj_dim=proj_dim,
-                    temperature=0.07,
-                    num_label_classes=2,
-                    num_model_classes=int(sd.get("cls_model.weight", torch.empty(0)).shape[0]) if ("cls_model.weight" in sd) else 1,
-                    num_set_classes=int(sd.get("cls_set.weight", torch.empty(0)).shape[0]) if ("cls_set.weight" in sd) else 1,
-                    a=0.0, b=0.0, c=0.0, d=1.0,
-                    one_loss=False,
-                    only_classifier=True,
-                    freeze_embedding_layer=False,
-                )
+            if any(k.startswith("model.") for k in sd) and not any(k.startswith("model.model.") for k in sd):
+                sd = {("model." + k if k.startswith("model.") else k): v for k, v in sd.items()}
+            has_cls_label = "cls_label.weight" in sd
+            has_classifier = "classifier.dense1.weight" in sd
+            if has_cls_label:
+                proj_dim = int(sd["cls_label.weight"].shape[1])
+                if _SimCLR_MultiLevel is not None:
+                    mdl = _SimCLR_MultiLevel(
+                        base_name=enc_dir,
+                        proj_dim=proj_dim,
+                        temperature=0.07,
+                        num_label_classes=2,
+                        num_model_classes=int(sd.get("cls_model.weight", torch.empty(0)).shape[0]) if ("cls_model.weight" in sd) else 1,
+                        num_set_classes=int(sd.get("cls_set.weight", torch.empty(0)).shape[0]) if ("cls_set.weight" in sd) else 1,
+                        a=0.0, b=0.0, c=0.0, d=1.0,
+                        one_loss=False,
+                        only_classifier=True,
+                        freeze_embedding_layer=False,
+                    )
+                else:
+                    mdl = _MinimalDetectiveForInfer(enc_dir, proj_dim)
+            elif has_classifier:
+                proj_dim = int(sd["classifier.dense1.weight"].shape[1])
+                cls_dim = int(sd.get("classifier.out_proj.weight", torch.empty(2, 0)).shape[0]) or 2
+                mdl = _MinimalDetectiveClassifier(enc_dir, proj_dim, classifier_dim=cls_dim)
             else:
-                mdl = _MinimalDetectiveForInfer(enc_dir, proj_dim)
+                raise RuntimeError(
+                    "[pretrained/DeTeCtive] 权重中缺少 cls_label.weight 或 classifier.dense1.weight，无法恢复分类器。"
+                )
 
             mdl.load_state_dict(sd, strict=False)
             self._tokenizer = AutoTokenizer.from_pretrained(enc_dir, use_fast=True)
@@ -825,6 +929,7 @@ class PretrainedDetector(DetectorBase):
             self.is_loaded = True
             self.outputs_prob = True
             self.disable_calibration = True
+            self.ai_label_id = 1
             return
 
         # ---------- 常规分支（LoRA / SeqCls / MLM / Causal） ----------
@@ -1037,12 +1142,14 @@ class PretrainedDetector(DetectorBase):
                     if os.path.isdir(cand):
                         dirs.append(cand)
         for d in dirs:
-            enc = os.path.join(d, "encoder_hf")
-            if not os.path.isdir(enc):
-                continue
             ckpt_best = os.path.join(d, "model_classifier_best.pth")
             ckpt_last = os.path.join(d, "model_classifier_last.pth")
-            if os.path.isfile(ckpt_best) or os.path.isfile(ckpt_last):
+            if not (os.path.isfile(ckpt_best) or os.path.isfile(ckpt_last)):
+                continue
+            enc = os.path.join(d, "encoder_hf")
+            if os.path.isdir(enc):
+                return d
+            if _find_detective_train_args(d):
                 return d
         return None
     # --------------------- NEW: KNN database builder ---------------------
@@ -1275,19 +1382,25 @@ class PretrainedDetector(DetectorBase):
         input_ids = toks["input_ids"].to(self.device)
         attention_mask = toks["attention_mask"].to(self.device)
 
+        def _encode_with(obj: Any) -> Optional[torch.Tensor]:
+            if obj is None:
+                return None
+            if hasattr(obj, "encode") and callable(getattr(obj, "encode")):
+                return obj.encode(input_ids=input_ids, attention_mask=attention_mask)
+            if callable(obj):
+                return obj({"input_ids": input_ids, "attention_mask": attention_mask})
+            return None
+
+        z = None
         if hasattr(self._model, "get_encoder") and callable(getattr(self._model, "get_encoder")):
-            enc = self._model.get_encoder()
-            assert hasattr(enc, "encode"), "[pretrained/DeTeCtive] encoder 缺少 encode(...) 方法。"
-            z = enc.encode(input_ids=input_ids, attention_mask=attention_mask)
-            cls_head = getattr(self._model, "cls_label", None)
+            z = _encode_with(self._model.get_encoder())
+        if z is None:
+            z = _encode_with(self._model)
+
+        if z is not None:
+            cls_head = getattr(self._model, "cls_label", None) or getattr(self._model, "classifier", None)
             if cls_head is None:
-                raise RuntimeError("[pretrained/DeTeCtive] 模型缺少 cls_label 分类头。")
-            logits = cls_head(z)
-        elif hasattr(self._model, "encode") and callable(getattr(self._model, "encode")):
-            z = self._model.encode(input_ids=input_ids, attention_mask=attention_mask)
-            cls_head = getattr(self._model, "cls_label", None)
-            if cls_head is None:
-                raise RuntimeError("[pretrained/DeTeCtive] 模型缺少 cls_label 分类头。")
+                raise RuntimeError("[pretrained/DeTeCtive] 模型缺少 cls_label/classifier 分类头。")
             logits = cls_head(z)
         else:
             if hasattr(self._model, "__call__"):

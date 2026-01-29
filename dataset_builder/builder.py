@@ -887,11 +887,18 @@ class DatasetBuilder:
             prompt = self._render_prompt(prefix=prefix, ex=ex, lang_override=ex_lang)
             prompt_tokens = _count_prompt_tokens_fallback(prompt)
 
-            # ctx keep_fields + collision removal (match normal build)
-            ctx = _filter_keep_fields(ex, getattr(self.cfg, "keep_fields", None))
-            for k in ("text", "article", "label", "record_id"):
-                ctx.pop(k, None)
-            for k in ("original", "prompt", "sample", "sampled", "rewritten", "meta", "lang", "model", "tokens"):
+            # ✅ attack-only: keep ONLY minimal provenance fields from the original file
+            # This prevents leaking dataset-specific junk fields like "index", "paraphrased_text", etc.
+            ctx: Dict[str, Any] = {}
+            for k in ("id", "lang", "model", "source"):
+                if k in ex and ex.get(k, None) is not None:
+                    ctx[k] = ex.get(k)
+
+            # drop anything that could collide with our schema (defensive)
+            for k in (
+                "text", "article", "label", "record_id",
+                "original", "prompt", "sample", "sampled", "rewritten", "meta", "tokens"
+            ):
                 ctx.pop(k, None)
 
             # --------- original/prompt objects (schema aligned) ----------

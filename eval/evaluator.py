@@ -13,6 +13,7 @@ import platform
 import re
 from datetime import datetime
 import warnings
+import random
 
 from tqdm.auto import tqdm
 
@@ -48,6 +49,7 @@ from ._asr import (
     _summarize_asr_attacks,
     _base_correct_cache_from_preds,
     _attack_method_name,
+    _compute_asr_any_success_one_method
 )
 
 # ---------- warning filters ----------
@@ -149,6 +151,401 @@ def _gpu_mem_str(w: int = W_MEM) -> str:
         return f"{mem_g:.3g}G".rjust(w)
     except Exception:
         return f"{'-':>{w}}"
+
+def _is_paired_builder_file(path: str, *, peek_lines: int = 10) -> bool:
+    if not (isinstance(path, str) and os.path.exists(path)):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for _ in range(peek_lines):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                if (
+                    isinstance(r, dict)
+                    and _looks_like_builder_record(r)
+                    and isinstance(r.get("sample"), list)
+                    and len(r["sample"]) >= 1  # ✅ 原来是 >=2
+                ):
+                    return True
+    except Exception:
+        return False
+    return False
+
+from pathlib import Path
+
+def _attack_key_from_sample(s: dict) -> str:
+    """
+    给 paired-builder 的 sample 条目生成一个“细化后的攻击键”。
+    - 主要看 s["attack"] / s["aug_method"]
+    - 对 typo 尽量拼上 meta 里的 subtype / op / rate 等，做到细粒度
+    """
+    if not isinstance(s, dict):
+        return "attack"
+
+    key = (s.get("attack") or s.get("aug_method") or s.get("name") or "attack")
+    key = str(key).strip()
+    if not key:
+        key = "attack"
+
+    meta = s.get("meta")
+    if isinstance(meta, dict):
+        kl = key.lower()
+        if kl.startswith("typo"):
+            # 细分 subtype/op（任选其一即可）
+            for mk in ("subtype", "variant", "mode", "op", "edit_type", "edit"):
+                if mk in meta and meta[mk] is not None:
+                    key = f"{key}/{meta[mk]}"
+                    break
+            # 细分强度（任选其一即可）
+            for mk in ("rate", "p", "eps", "level", "severity"):
+                if mk in meta and meta[mk] is not None:
+                    key = f"{key}@{mk}={meta[mk]}"
+                    break
+    return key
+
+
+def _extract_attack_groups_from_paired_file(path: str, *, base_ids: set | None = None) -> dict[str, list[dict]]:
+    """
+    paired-builder attack 文件：每个 record 里 sample 有 src + 多个 attack 变体。
+    返回：{attack_key: [examples...]}，examples 的 id 与 base 的 id 对齐（用于 ASR 对齐）
+    """
+    groups: dict[str, list[dict]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if not (isinstance(rec, dict) and _looks_like_builder_record(rec)):
+                continue
+
+            base_ex = _builder_record_to_base_example(rec)
+            if base_ex is None:
+                continue
+
+            base_id = base_ex.get("id", rec.get("id"))
+            if base_id is None:
+                continue
+            if base_ids is not None and base_id not in base_ids:
+                continue
+
+            label = int(base_ex.get("label", 1))
+
+            smp = rec.get("sample")
+            if not isinstance(smp, list) or len(smp) == 0:
+                continue
+
+            for a in smp:
+                if not isinstance(a, dict):
+                    continue
+                atk = _attack_key_from_sample(a).strip()
+                atk_l = atk.lower()
+                # 跳过 src/orig
+                if atk_l in ("src", "source", "orig", "original", ""):
+                    continue
+                text = a.get("text")
+                if text is None:
+                    continue
+
+                ex = {
+                    "id": base_id,                 # ✅ 与 base 对齐
+                    "text": str(text),
+                    "label": label,
+                    "attack": atk,
+                }
+                # 可选保留 meta/lang 等
+                for k in ("lang", "split", "source", "sub_source", "model"):
+                    if k in rec and rec[k] is not None:
+                        ex[k] = rec[k]
+                groups.setdefault(atk, []).append(ex)
+
+    return groups
+
+
+def _extract_attack_groups_from_flat_file(path: str, *, base_ids: set | None = None) -> dict[str, list[dict]]:
+    """
+    flat attack 文件：同一行可能出现多个攻击字段，例如：
+      - text_typo_swap, text_typo_del, ...
+      - 或者 text + attack 字段
+    返回：{attack_key: [examples...]}
+    """
+    groups: dict[str, list[dict]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if not isinstance(rec, dict):
+                continue
+
+            base_id = rec.get("id")
+            if base_id is None:
+                continue
+            if base_ids is not None and base_id not in base_ids:
+                continue
+
+            label = rec.get("label", rec.get("orig_label", None))
+            if label is None:
+                continue
+            label = int(label)
+
+            # 形式1：每行一个 attack（用 rec["attack"] 分组）
+            if "attack" in rec and "text" in rec and rec["text"] is not None:
+                atk = str(rec["attack"]).strip() or "attack"
+                groups.setdefault(atk, []).append(
+                    {"id": base_id, "text": str(rec["text"]), "label": label, "attack": atk}
+                )
+                continue
+
+            # 形式2：多字段 text_xxx
+            _SKIP_SUFFIX = {"src", "source", "orig", "original", "base", "clean"}  # ✅ base字段别当攻击
+
+            for k, v in rec.items():
+                if not isinstance(k, str):
+                    continue
+                if not k.startswith("text_"):
+                    continue
+                if v is None:
+                    continue
+
+                suffix = k[len("text_"):].strip()
+                if suffix.lower() in _SKIP_SUFFIX:
+                    continue  # ✅ 跳过 base/source 字段
+
+                atk = suffix or "attack"
+                groups.setdefault(atk, []).append(
+                    {"id": base_id, "text": str(v), "label": label, "attack": atk}
+                )
+
+    return groups
+
+_BASE_TEXT_KEYS = ("text_src", "text_orig", "text_original", "original_text", "src_text", "text")
+
+def _is_flat_multi_attack_file(path: str, *, peek_lines: int = 10) -> bool:
+    """
+    判断 flat jsonl/json 是否是“一个record含多个 text_* 攻击字段”的容器文件。
+    条件：存在至少一个 text_XXX(非src/orig/base/clean) 字段，同时能找到某个 base 文本字段。
+    """
+    if not (isinstance(path, str) and os.path.exists(path)):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for _ in range(peek_lines):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if not isinstance(rec, dict):
+                    continue
+
+                # 有 base text 字段？
+                has_base = any((k in rec and rec.get(k) not in (None, "")) for k in _BASE_TEXT_KEYS)
+
+                # 有 attack text_ 字段？
+                has_attack = False
+                for k, v in rec.items():
+                    if not (isinstance(k, str) and k.startswith("text_")):
+                        continue
+                    if v in (None, ""):
+                        continue
+                    suffix = k[len("text_"):].strip().lower()
+                    if suffix in {"src", "source", "orig", "original", "base", "clean"}:
+                        continue
+                    has_attack = True
+                    break
+
+                if has_base and has_attack:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _flat_record_to_base_example(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    flat 多字段 record -> base example（主评测用）
+    base text 优先级：text_src/text_orig/... > text
+    """
+    if not isinstance(rec, dict):
+        return None
+
+    base_text = None
+    for k in _BASE_TEXT_KEYS:
+        v = rec.get(k)
+        if v not in (None, ""):
+            base_text = str(v)
+            break
+    if base_text is None:
+        return None
+
+    # label / id
+    y = rec.get("orig_label", rec.get("label", None))
+    if y is None:
+        return None
+
+    ex: Dict[str, Any] = {
+        "id": rec.get("id", None),
+        "text": base_text,
+        "label": int(y),
+    }
+    for k in ("lang", "split", "source", "sub_source", "model"):
+        if k in rec and rec[k] is not None:
+            ex[k] = rec[k]
+    return ex
+
+
+def _load_base_examples_from_flat_multi_attack_file(
+    path: str,
+    *,
+    sample_k: Optional[int],
+    sample_seed: int,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    rng = random.Random(int(sample_seed))
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if not isinstance(rec, dict):
+                continue
+            b = _flat_record_to_base_example(rec)
+            if b is not None:
+                out.append(b)
+
+    if sample_k is not None and int(sample_k) > 0 and len(out) > int(sample_k):
+        rng.shuffle(out)
+        out = out[: int(sample_k)]
+    return out
+
+def _extract_attack_groups(path: str, *, base_ids: set | None = None) -> dict[str, list[dict]]:
+    # paired-builder 优先
+    if _is_paired_builder_file(path):
+        return _extract_attack_groups_from_paired_file(path, base_ids=base_ids)
+    return _extract_attack_groups_from_flat_file(path, base_ids=base_ids)
+
+def _builder_record_to_base_example(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    把一个 builder record 转成 “用于主评测的 base 样本”：
+      - text: 优先 rec["original"][0]["text"], 否则找 sample 中 attack=src 的 text
+      - id:   优先 rec["id"]（稳定 id），否则 fallback
+      - label: 优先 orig_label，再 fallback 到 label
+    """
+    if not (isinstance(rec, dict) and _looks_like_builder_record(rec)):
+        return None
+
+    base_src = None
+
+    # 1) prefer original[0]
+    orig = rec.get("original")
+    if isinstance(orig, list) and orig and isinstance(orig[0], dict) and (orig[0].get("text") is not None):
+        base_src = orig[0]
+
+    # 2) fallback: sample attack=="src"
+    if base_src is None:
+        smp = rec.get("sample")
+        if isinstance(smp, list):
+            for a in smp:
+                if not isinstance(a, dict):
+                    continue
+                atk = str(a.get("attack") or a.get("aug_method") or "").strip().lower()
+                if atk in ("src", "source", "orig", "original", "") and (a.get("text") is not None):
+                    base_src = a
+                    break
+            if base_src is None and smp and isinstance(smp[0], dict) and (smp[0].get("text") is not None):
+                base_src = smp[0]
+
+    if base_src is None:
+        return None
+
+    ex: Dict[str, Any] = {}
+
+    ex["text"] = str(base_src.get("text") or "")
+    # label priority: base_src.orig_label -> base_src.label -> rec.orig_label -> rec.label
+    y = base_src.get("orig_label", base_src.get("label", rec.get("orig_label", rec.get("label", 1))))
+    ex["label"] = int(y)
+
+    # stable id: rec.id preferred
+    ex["id"] = rec.get("id", base_src.get("id", None))
+
+    # keep common grouping/meta fields
+    for k in ("lang", "split", "source", "sub_source", "model"):
+        if k in rec:
+            ex[k] = rec.get(k)
+        elif k in base_src:
+            ex[k] = base_src.get(k)
+
+    # keep ids if present (help alignment)
+    for k in ("orig_id", "base_id", "source_id"):
+        if k in rec:
+            ex[k] = rec.get(k)
+
+    return ex
+
+
+def _load_base_examples_from_paired_file(
+    path: str,
+    *,
+    sample_k: Optional[int],
+    sample_seed: int,
+) -> List[Dict[str, Any]]:
+    """
+    关键：主评测只返回 “非 builder 样本（通常是 human） + builder record 的 base(original/src)”
+    不把 sample 里的攻击变体摊平到主评测里。
+    """
+    out: List[Dict[str, Any]] = []
+    rng = random.Random(int(sample_seed))
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if not isinstance(rec, dict):
+                continue
+
+            b = _builder_record_to_base_example(rec)
+            if b is not None:
+                out.append(b)
+            else:
+                # 普通样本（通常 human / 或者已是 flat 格式）
+                if "text" in rec and ("label" in rec or "orig_label" in rec):
+                    ex = dict(rec)
+                    if "label" not in ex and "orig_label" in ex:
+                        ex["label"] = int(ex["orig_label"])
+                    out.append(ex)
+
+    # 可选采样：简单 shuffle+截断（如果你非常在意分层，可以后续再换成 stratified）
+    if sample_k is not None and int(sample_k) > 0 and len(out) > int(sample_k):
+        rng.shuffle(out)
+        out = out[: int(sample_k)]
+    # ✅ dedup by id (important for one-to-many files where base repeats across attacks)
+    seen = set()
+    dedup = []
+    for ex in out:
+        _id = ex.get("id", None) if isinstance(ex, dict) else None
+        if _id is None:
+            dedup.append(ex)
+            continue
+        if _id in seen:
+            continue
+        seen.add(_id)
+        dedup.append(ex)
+    out = dedup
+
+    return out
 
 def _print_eval_header(prefix: str = "") -> None:
     # columns: Run Seed GPU_mem N Acc F1 AUROC AUPR ECE t(s)
@@ -613,9 +1010,9 @@ def evaluate_detector(
                 atk_key = Path(str(atk_path)).stem
                 atk_iter.set_description(f"ASR [{atk_key}]")
 
-                atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=base, group_cols=group_cols, builder_view="post")
+                atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="flat")
                 if not atk_exs:
-                    atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=base, group_cols=group_cols, builder_view="flat")
+                    atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="post")
 
                 has_method = any(isinstance(x, dict) and _attack_method_name(x) != "unknown" for x in atk_exs)
                 if has_method:
@@ -701,12 +1098,47 @@ def evaluate_detector(
 
     t0 = time.perf_counter()
     proc0 = _proc_snapshot()
-    examples, used_group_cols = load_dataset_unified(
-        dataset=dataset,
-        sample_k=sample_k,
-        sample_seed=sample_seed,
-        group_cols=group_cols,
-    )
+
+    paired_base_mode = False
+    flat_multi_mode = False
+    if isinstance(dataset, str) and (dataset.endswith(".jsonl") or dataset.endswith(".json")) and os.path.exists(dataset):
+        paired_base_mode = _is_paired_builder_file(dataset)
+        if not paired_base_mode:
+            flat_multi_mode = _is_flat_multi_attack_file(dataset)
+
+    if paired_base_mode:
+        # ✅ 主评测：只评估 original/src + 非 builder（human）
+        examples = _load_base_examples_from_paired_file(
+            dataset,
+            sample_k=sample_k,
+            sample_seed=sample_seed,
+        )
+        # group cols：尽量保持你现在风格（id/lang/split 常见）
+        if group_cols is not None:
+            used_group_cols = list(group_cols)
+        else:
+            used_group_cols = []
+            for k in ("id", "lang", "split", "source", "sub_source", "model"):
+                if any(isinstance(ex, dict) and (k in ex) for ex in examples):
+                    used_group_cols.append(k)
+    elif flat_multi_mode:
+        examples = _load_base_examples_from_flat_multi_attack_file(dataset, sample_k=sample_k, sample_seed=sample_seed)
+        # used_group_cols 同你 paired 分支那套推断
+        if group_cols is not None:
+            used_group_cols = list(group_cols)
+        else:
+            used_group_cols = []
+            for k in ("id", "lang", "split", "source", "sub_source", "model"):
+                if any(isinstance(ex, dict) and (k in ex) for ex in examples):
+                    used_group_cols.append(k)
+    else:
+        examples, used_group_cols = load_dataset_unified(
+            dataset=dataset,
+            sample_k=sample_k,
+            sample_seed=sample_seed,
+            group_cols=group_cols,
+        )
+
     load_time = time.perf_counter() - t0
 
     if show_progress:
@@ -868,7 +1300,7 @@ def evaluate_detector(
                     if not line:
                         continue
                     r = json.loads(line)
-                    if isinstance(r, dict) and _looks_like_builder_record(r) and isinstance(r.get("sample"), list) and len(r["sample"]) >= 2:
+                    if isinstance(r, dict) and _looks_like_builder_record(r) and isinstance(r.get("sample"), list) and len(r["sample"]) >= 1:
                         auto_paired_asr = True
                         break
         except Exception:
@@ -877,53 +1309,119 @@ def evaluate_detector(
     if auto_paired_asr:
         if show_progress:
             print(f"[MGTEval] ASR: auto paired dataset detected -> {dataset}")
-        base_for_asr = _load_examples_auto(dataset, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="pre")
-        atk_for_asr = _load_examples_auto(dataset, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="post")
-        asr_results = {
-            "definition": "ASR = 1 - Acc(attack | correct_before_attack)",
-            "auto_paired_dataset": str(dataset),
-            "attacks": {
-                "paired": _compute_asr(
+
+        # ✅ 复用主评测的 base（已经是 original/src + human 的版本）
+        base_for_asr = examples
+
+        # attack side 仍然从 post 读（这里就是“攻击后的文本”）
+        atk_for_asr = _load_examples_auto(
+            dataset,
+            sample_k=None,
+            sample_seed=sample_seed,
+            group_cols=group_cols,
+            builder_view="post",
+        )
+
+        if auto_paired_asr:
+
+            base_for_asr = examples
+
+            # ✅ 用 base_ids 过滤（尤其 sample_k 时很重要）
+            base_ids = {ex.get("id") for ex in base_for_asr if isinstance(ex, dict) and ex.get("id") is not None}
+            groups = _extract_attack_groups(str(dataset), base_ids=base_ids)
+
+            attacks_out: Dict[str, Any] = {}
+
+            if groups:
+                # ✅ 每个字段/每个变体一个结果
+                for gk, atk_exs in sorted(groups.items(), key=lambda x: x[0]):
+                    out_key = f"paired/{gk}"
+                    attacks_out[out_key] = _compute_asr_any_success_one_method(
+                        det,
+                        base_for_asr,
+                        atk_exs,  # 同一攻击键下的所有 variants（允许一对多）
+                        batch_size=batch_size,
+                        threshold=threshold,
+                        show_progress=show_progress,
+                        base_cache=base_cache,  # ✅ 复用 base 的 correct cache
+                    )
+                    attacks_out[out_key]["attack_dataset"] = str(dataset)
+                    attacks_out[out_key]["attack_key"] = gk
+            else:
+                # 兜底：保持旧行为
+                atk_for_asr = _load_examples_auto(
+                    dataset, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="post"
+                )
+                attacks_out["paired"] = _compute_asr(
                     det, base_for_asr, atk_for_asr,
                     batch_size=batch_size, threshold=threshold, show_progress=show_progress,
+                    base_cache=base_cache,
                 )
-            },
-        }
-        asr_results["summary"] = _summarize_asr_attacks(asr_results["attacks"])
+                attacks_out["paired"]["attack_dataset"] = str(dataset)
+
+            asr_results = {
+                "definition": "ASR = 1 - Acc(attack | correct_before_attack)",
+                "auto_paired_dataset": str(dataset),
+                "attacks": attacks_out,
+            }
+            asr_results["summary"] = _summarize_asr_attacks(attacks_out)
+
 
     elif atk_specs:
         if show_progress:
             print(f"[MGTEval] ASR: evaluating {len(atk_specs)} attack dataset(s)...")
+
         base_for_asr = examples
+        base_ids = {ex.get("id") for ex in base_for_asr if isinstance(ex, dict) and ex.get("id") is not None}
         attacks_out: Dict[str, Any] = {}
 
         atk_iter = tqdm(atk_specs, desc="ASR", leave=True, dynamic_ncols=True, disable=(not show_progress))
         for atk_path in atk_iter:
-            atk_key = Path(str(atk_path)).stem
-            atk_iter.set_description(f"ASR [{atk_key}]")
+            stem = Path(str(atk_path)).stem
+            atk_iter.set_description(f"ASR [{stem}]")
 
-            atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="post")
-            if not atk_exs:
-                atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="flat")
+            groups = _extract_attack_groups(str(atk_path), base_ids=base_ids)
 
-            has_method = any(isinstance(x, dict) and _attack_method_name(x) != "unknown" for x in atk_exs)
-            if has_method:
-                attacks_out[atk_key] = _compute_asr_by_method(
+            if groups and len(groups) > 1:
+                for gk, atk_exs in sorted(groups.items(), key=lambda x: x[0]):
+                    out_key = f"{stem}/{gk}"
+                    attacks_out[out_key] = _compute_asr(
+                        det, base_for_asr, atk_exs,
+                        batch_size=batch_size, threshold=threshold, show_progress=show_progress,
+                        base_cache=base_cache,
+                    )
+                    attacks_out[out_key]["attack_dataset"] = str(atk_path)
+                    attacks_out[out_key]["attack_key"] = gk
+            elif groups:
+                (gk, atk_exs), = groups.items()
+                out_key = stem
+                attacks_out[out_key] = _compute_asr(
                     det, base_for_asr, atk_exs,
                     batch_size=batch_size, threshold=threshold, show_progress=show_progress,
                     base_cache=base_cache,
                 )
+                attacks_out[out_key]["attack_dataset"] = str(atk_path)
+                attacks_out[out_key]["attack_key"] = gk
             else:
-                attacks_out[atk_key] = _compute_asr(
-                    det, base_for_asr, atk_exs,
-                    batch_size=batch_size, threshold=threshold, show_progress=show_progress,
-                    base_cache=base_cache,
-                )
-            attacks_out[atk_key]["attack_dataset"] = str(atk_path)
+                # fallback：沿用你原来的 loader + by_method
+                atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="flat")
+                if not atk_exs:
+                    atk_exs = _load_examples_auto(atk_path, sample_k=None, sample_seed=sample_seed, group_cols=group_cols, builder_view="post")
 
-            if show_progress:
-                s = attacks_out[atk_key].get("summary", {})
-                print(f"[MGTEval] ASR[{atk_key}] -> {s}")
+                has_method = any(isinstance(x, dict) and _attack_method_name(x) != "unknown" for x in atk_exs)
+                if has_method:
+                    attacks_out[stem] = _compute_asr_by_method(
+                        det, base_for_asr, atk_exs,
+                        batch_size=batch_size, threshold=threshold, show_progress=show_progress,
+                        base_cache=base_cache,
+                    )
+                else:
+                    attacks_out[stem] = _compute_asr(
+                        det, base_for_asr, atk_exs,
+                        batch_size=batch_size, threshold=threshold, show_progress=show_progress,
+                        base_cache=base_cache,
+                    )
+                attacks_out[stem]["attack_dataset"] = str(atk_path)
 
         asr_results = {
             "definition": "ASR = 1 - Acc(attack | correct_before_attack)",

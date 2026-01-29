@@ -10,14 +10,67 @@ from ._utils_loader import _load_examples_auto
 
 
 def _attack_method_name(e: Dict[str, Any]) -> str:
-    for k in ("aug_method", "attack_method", "attack_type"):
+    """
+    兼容多种输入形态：
+      1) 变体样本（flatten 后）：attack / attack_short / aug_method ...
+      2) 原始 record：meta.active_attack 或 sample[0].attack
+      3) 兜底：从 id 中解析 -ta_xxx-（如 ...-ta_tran-...）
+    并尽量统一成 text_* 命名（与你 builder 的 meta.active_attack 对齐）。
+    """
+    # 1) 直接字段（flatten 样本最常见）
+    for k in ("attack", "attack_full", "attack_name", "aug_method", "attack_method", "attack_type", "attack_short"):
         v = e.get(k, None)
         if v is not None:
             s = str(v).strip()
             if s:
+                # 如果是短名（tran/subs/...），尽量补 text_ 前缀
+                if not s.startswith("text_"):
+                    meta = e.get("meta")
+                    if isinstance(meta, dict):
+                        aa = str(meta.get("active_attack") or "").strip()
+                        if aa.startswith("text_") and aa.lower().endswith(s.lower()):
+                            return aa
+                        if isinstance(meta.get("text_attack_meta", None), list):
+                            return "text_" + s
+                    # flatten 后通常没有 meta，但你也可以接受短名
                 return s
-    return "unknown"
 
+    # 2) record-level: meta.active_attack
+    meta = e.get("meta")
+    if isinstance(meta, dict):
+        aa = meta.get("active_attack", None)
+        if aa is not None:
+            s = str(aa).strip()
+            if s:
+                return s
+
+    # 3) record-level: sample[0].attack（你给的 jsonl 就是这种）
+    smp = e.get("sample")
+    if isinstance(smp, list) and smp:
+        obj = smp[0]
+        if isinstance(obj, dict):
+            v = obj.get("attack") or obj.get("aug_method") or obj.get("attack_method") or obj.get("attack_type")
+            if v is not None:
+                s = str(v).strip()
+                if s:
+                    if not s.startswith("text_"):
+                        if isinstance(meta, dict) and str(meta.get("active_attack") or "").strip().startswith("text_"):
+                            return "text_" + s
+                    return s
+
+    # 4) 兜底：从 id 里解析 -ta_xxx-
+    sid = str(e.get("id") or "").strip()
+    if sid:
+        token = "-ta_"
+        j = sid.find(token)
+        if j >= 0:
+            j2 = sid.find("-", j + len(token))
+            frag = sid[j + len(token): (j2 if j2 >= 0 else len(sid))].strip()
+            if frag:
+                # 解析到的是短名，默认补 text_，更符合你 meta.active_attack 的风格
+                return frag if frag.startswith("text_") else ("text_" + frag)
+
+    return "unknown"
 
 def _match_key(e: Dict[str, Any]) -> Optional[str]:
     for k in ("orig_id", "base_id", "source_id"):
@@ -66,6 +119,88 @@ def _summarize_asr_attacks(attacks_out: Dict[str, Any]) -> Dict[str, Any]:
         "weighting": "attack_eval_n (fallback base_correct_n)",
     }
 
+# ===== NEW: paired-record helpers =====
+
+def _is_paired_record(r: Any) -> bool:
+    if not isinstance(r, dict):
+        return False
+    if not isinstance(r.get("original"), list) or not isinstance(r.get("sample"), list):
+        return False
+    if not r["original"] or not r["sample"]:
+        return False
+    o0 = r["original"][0]
+    s0 = r["sample"][0]
+    return isinstance(o0, dict) and isinstance(o0.get("text"), str) and isinstance(s0, dict) and isinstance(s0.get("text"), str)
+
+def _record_label(r: Dict[str, Any], default: int = 1) -> int:
+    # attack-only: label 常在 meta.base_source.orig_label / original[0].orig_label / sample[0].orig_label
+    for path in (
+        ("label",),
+        ("meta", "base_source", "orig_label"),
+        ("original", 0, "orig_label"),
+        ("sample", 0, "orig_label"),
+    ):
+        cur: Any = r
+        ok = True
+        for k in path:
+            try:
+                cur = cur[k] if isinstance(k, int) else cur.get(k)
+            except Exception:
+                ok = False
+                break
+        if ok and cur is not None:
+            try:
+                return int(cur)
+            except Exception:
+                pass
+    return int(default)
+
+def _record_id(r: Dict[str, Any]) -> Optional[str]:
+    # 你示例里顶层 id 就是 source_id
+    v = _norm_id(r.get("id"))
+    if v is not None:
+        return v
+    meta = r.get("meta")
+    if isinstance(meta, dict):
+        bs = meta.get("base_source")
+        if isinstance(bs, dict):
+            v2 = _norm_id(bs.get("source_id"))
+            if v2 is not None:
+                return v2
+    return None
+
+def _extract_original_text(r: Dict[str, Any]) -> Optional[str]:
+    try:
+        o0 = r["original"][0]
+        t = o0.get("text")
+        if isinstance(t, str) and t.strip():
+            return t
+    except Exception:
+        pass
+    return None
+
+def _extract_attack_variants(r: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    从 record.sample 中取攻击变体：
+    - 若 sample=[src, attacked, ...]：跳过 attack=='src'
+    - 若 sample=[attacked]：直接用
+    返回的是 “variant dict（原始对象）” 列表
+    """
+    out: List[Dict[str, Any]] = []
+    smp = r.get("sample")
+    if not isinstance(smp, list):
+        return out
+    for obj in smp:
+        if not isinstance(obj, dict):
+            continue
+        t = obj.get("text")
+        if not isinstance(t, str) or not t.strip():
+            continue
+        atk = str(obj.get("attack") or "").strip().lower()
+        if atk == "src":
+            continue
+        out.append(obj)
+    return out
 
 def _align_pairs(base_exs: List[Dict[str, Any]], atk_exs: List[Dict[str, Any]]):
     base_keys = [_match_key(e) for e in base_exs]
@@ -191,6 +326,115 @@ def _compute_asr(
     """
     ASR = 1 - Acc(attack | correct_before_attack)
     """
+    # ===== NEW: paired-record ASR (base from original[0], attacks from sample[*]) =====
+    if atk_exs and any(_is_paired_record(x) for x in atk_exs):
+        # build base originals + all variants (one-to-many), then do:
+        # 1) eval originals; keep only base-correct
+        # 2) eval variants of base-correct; any-success => ASR
+
+        base_exs: List[Dict[str, Any]] = []
+        var_exs: List[Dict[str, Any]] = []
+        var_base_pos: List[int] = []
+
+        for r in atk_exs:
+            if not _is_paired_record(r):
+                continue
+            rid = _record_id(r) or None
+            y = _record_label(r, default=1)
+            ot = _extract_original_text(r)
+            if ot is None:
+                continue
+
+            bpos = len(base_exs)
+            base_exs.append({"id": rid, "text": ot, "label": int(y)})
+
+            variants = _extract_attack_variants(r)
+            for v in variants:
+                vt = v.get("text")
+                if not isinstance(vt, str) or not vt.strip():
+                    continue
+                # 保留 attack 字段给统计/分桶用；label 强制对齐到 original 的 label
+                ex = dict(v)
+                ex["label"] = int(y)
+                if rid is not None:
+                    ex["id"] = rid
+                var_exs.append(ex)
+                var_base_pos.append(int(bpos))
+
+        # no usable pairs
+        if not base_exs or not var_exs:
+            return {
+                "match_mode": "paired_record",
+                "align": {"base_n": len(base_exs), "attack_variant_n_raw": len(var_exs), "note": "no valid paired records"},
+                "base_correct_n": 0,
+                "attack_eval_n": 0,
+                "attack_acc": None,
+                "asr": None,
+            }
+
+        # (1) evaluate originals
+        res0 = det.evaluate(base_exs, batch_size=batch_size, threshold=threshold, show_progress=show_progress)
+        y0 = [int(x) for x in res0.labels]
+        p0 = [int(x) for x in res0.preds]
+        base_correct_mask = [yy == pp for yy, pp in zip(y0, p0)]
+
+        # (2) filter variants by base-correct
+        var_eval: List[Dict[str, Any]] = []
+        var_eval_base_pos: List[int] = []
+        for ex, bp in zip(var_exs, var_base_pos):
+            if 0 <= bp < len(base_correct_mask) and bool(base_correct_mask[bp]):
+                var_eval.append(ex)
+                var_eval_base_pos.append(int(bp))
+
+        if not var_eval:
+            return {
+                "match_mode": "paired_record",
+                "align": {"base_n": len(base_exs), "attack_variant_n_raw": len(var_exs), "attack_variant_n_eval": 0},
+                "base_correct_n": int(sum(1 for ok in base_correct_mask if ok)),
+                "attack_eval_n": 0,
+                "attack_acc": None,
+                "asr": None,
+            }
+
+        # (3) evaluate variants
+        res1 = det.evaluate(var_eval, batch_size=batch_size, threshold=threshold, show_progress=show_progress)
+        y1 = [int(x) for x in res1.labels]
+        p1 = [int(x) for x in res1.preds]
+        var_ok = [yy == pp for yy, pp in zip(y1, p1)]
+        var_acc = sum(1 for ok in var_ok if ok) / max(1, len(var_ok))
+
+        # (4) any-success aggregation per base
+        fail_by_base: Dict[int, bool] = {}
+        for bp, ok in zip(var_eval_base_pos, var_ok):
+            if bp not in fail_by_base:
+                fail_by_base[bp] = False
+            if not ok:
+                fail_by_base[bp] = True
+
+        base_eval_positions = sorted(fail_by_base.keys())
+        base_eval_n = len(base_eval_positions)
+        success_n = sum(1 for bp in base_eval_positions if fail_by_base.get(bp, False))
+        asr = (success_n / base_eval_n) if base_eval_n > 0 else None
+        attack_acc_base = (1.0 - asr) if asr is not None else None
+
+        return {
+            "match_mode": "paired_record",
+            "align": {
+                "base_n": int(len(base_exs)),
+                "attack_variant_n_raw": int(len(var_exs)),
+                "attack_variant_n_eval": int(len(var_eval)),
+                "base_eval_n": int(base_eval_n),
+                "note": "base correctness from record.original[0].text; variants from record.sample[*] (skip attack=='src'); any-success aggregation",
+            },
+            "base_correct_n": int(sum(1 for ok in base_correct_mask if ok)),
+            "attack_eval_n": int(base_eval_n),
+            "attack_variant_n": int(len(var_eval)),
+            "attack_variant_acc": float(var_acc),
+            "attack_acc": float(attack_acc_base) if attack_acc_base is not None else None,
+            "asr": float(asr) if asr is not None else None,
+            "aggregation": "any-success over record-local variants",
+        }
+
     base_aligned, atk_aligned, mode, align_stats = _align_pairs(base_exs, atk_exs)
     if len(base_aligned) == 0:
         return {
@@ -436,6 +680,126 @@ def _compute_asr_by_method(
     show_progress: bool,
     base_cache: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    # ===== NEW: paired-record ASR-by-method (base from original[0]) =====
+    if atk_exs and any(_is_paired_record(x) for x in atk_exs):
+        base_exs: List[Dict[str, Any]] = []
+        var_exs: List[Dict[str, Any]] = []
+        var_base_pos: List[int] = []
+        var_method: List[str] = []
+
+        for r in atk_exs:
+            if not _is_paired_record(r):
+                continue
+            rid = _record_id(r) or None
+            y = _record_label(r, default=1)
+            ot = _extract_original_text(r)
+            if ot is None:
+                continue
+
+            bpos = len(base_exs)
+            base_exs.append({"id": rid, "text": ot, "label": int(y)})
+
+            variants = _extract_attack_variants(r)
+            for v in variants:
+                vt = v.get("text")
+                if not isinstance(vt, str) or not vt.strip():
+                    continue
+                ex = dict(v)
+                ex["label"] = int(y)
+                if rid is not None:
+                    ex["id"] = rid
+                var_exs.append(ex)
+                var_base_pos.append(int(bpos))
+                var_method.append(_attack_method_name(v) or "unknown")
+
+        if not base_exs or not var_exs:
+            return {
+                "by_method": {},
+                "summary": _summarize_asr_attacks({}),
+                "note": "paired-record mode: no valid records/variants",
+                "base_cache": {"base_n": int(len(base_exs)), "use_key": False},
+            }
+
+        # 1) eval originals once
+        res0 = det.evaluate(base_exs, batch_size=batch_size, threshold=threshold, show_progress=show_progress)
+        y0 = [int(x) for x in res0.labels]
+        p0 = [int(x) for x in res0.preds]
+        base_correct_mask = [yy == pp for yy, pp in zip(y0, p0)]
+
+        # 2) eval ALL variants of base-correct once
+        var_eval: List[Dict[str, Any]] = []
+        var_eval_bp: List[int] = []
+        var_eval_m: List[str] = []
+        for ex, bp, m in zip(var_exs, var_base_pos, var_method):
+            if 0 <= bp < len(base_correct_mask) and bool(base_correct_mask[bp]):
+                var_eval.append(ex)
+                var_eval_bp.append(int(bp))
+                var_eval_m.append(m)
+
+        by_method: Dict[str, Any] = {}
+        if not var_eval:
+            return {
+                "by_method": {},
+                "summary": _summarize_asr_attacks({}),
+                "note": "paired-record mode: no variants after filtering by base-correct originals",
+                "base_cache": {"base_n": int(len(base_exs)), "use_key": False},
+            }
+
+        res1 = det.evaluate(var_eval, batch_size=batch_size, threshold=threshold, show_progress=show_progress)
+        y1 = [int(x) for x in res1.labels]
+        p1 = [int(x) for x in res1.preds]
+        var_ok = [int(yy) == int(pp) for yy, pp in zip(y1, p1)]
+
+        # 3) aggregate per method (any-success per base within that method)
+        methods = sorted(set(var_eval_m))
+        for m in methods:
+            idxs = [i for i, mm in enumerate(var_eval_m) if mm == m]
+            if not idxs:
+                continue
+
+            # variant-level acc for this method
+            var_acc = sum(1 for i in idxs if var_ok[i]) / max(1, len(idxs))
+
+            fail_by_base: Dict[int, bool] = {}
+            for i in idxs:
+                bp = var_eval_bp[i]
+                if bp not in fail_by_base:
+                    fail_by_base[bp] = False
+                if not var_ok[i]:
+                    fail_by_base[bp] = True
+
+            base_eval_positions = sorted(fail_by_base.keys())
+            base_eval_n = len(base_eval_positions)
+            success_n = sum(1 for bp in base_eval_positions if fail_by_base.get(bp, False))
+            asr = (success_n / base_eval_n) if base_eval_n > 0 else None
+            attack_acc_base = (1.0 - asr) if asr is not None else None
+
+            by_method[m] = {
+                "match_mode": "paired_record",
+                "align": {
+                    "base_n": int(len(base_exs)),
+                    "attack_variant_n_eval": int(len(idxs)),
+                    "base_eval_n": int(base_eval_n),
+                    "note": "base correctness from record.original[0]; method variants from record.sample[*]; any-success per base within method",
+                },
+                "base_correct_n": int(sum(1 for ok in base_correct_mask if ok)),
+                "attack_eval_n": int(base_eval_n),
+                "attack_variant_n": int(len(idxs)),
+                "attack_variant_acc": float(var_acc),
+                "attack_acc": float(attack_acc_base) if attack_acc_base is not None else None,
+                "asr": float(asr) if asr is not None else None,
+                "aggregation": "any-success over record-local variants (method-specific)",
+                "attack_method": m,
+                "attack_n_raw": int(len(idxs)),
+            }
+
+        return {
+            "by_method": by_method,
+            "summary": _summarize_asr_attacks(by_method),
+            "note": "ASR(by_method) in paired-record mode; originals evaluated first, then variants filtered by base-correct originals.",
+            "base_cache": {"base_n": int(len(base_exs)), "use_key": False},
+        }
+
     buckets: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
     for a in atk_exs:
         buckets[_attack_method_name(a)].append(a)
