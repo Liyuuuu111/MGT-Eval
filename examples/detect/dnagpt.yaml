@@ -1,0 +1,32 @@
+detector: dnagpt
+data: data/arxiv.qwen3_4b.test.jsonl
+model1: EleutherAI/gpt-neo-125m
+batch_size: 8
+threshold: 0.5
+seed: 114514
+sample_k: 2000
+device: 'cuda:0'
+bf16: true
+out: 'runs/dnagpt'
+save_curves: true
+no_progress: false
+k_runs: 1
+detector_kwargs:
+  # score_model: EleutherAI/gpt-neo-125m
+  # dataset_name: squad
+  truncate_ratio: 0.5
+  regen_number: 10
+  max_length: 512
+  min_length_pubmed: 50
+  min_length_non_pubmed: 150
+  do_top_k: false
+  top_k: 40
+  do_top_p: false
+  top_p: 0.96
+  temperature: 1.0
+  device: 'cuda:0'
+  use_bfloat16: true
+  calibrator_path: calibration_results/
+  calibrator_name: platt_lr
+  auto_calibrate: false
+  force_runner_calibration: false

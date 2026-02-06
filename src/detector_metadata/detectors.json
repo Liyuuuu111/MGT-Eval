@@ -1,0 +1,232 @@
+[
+  {
+    "key": "binoculars",
+    "detector": "binoculars",
+    "name": "Binoculars",
+    "type": "Metric-based",
+    "description": "Likelihood ratio between observer and performer models",
+    "paper": "Spotting LLMs With Binoculars: Zero-Shot Detection of Machine-Generated Text",
+    "authors": "Abhimanyu Hans, Avi Schwarzschild, Valeriia Cherepanova, Hamid Kazemi, Aniruddha Saha, Micah Goldblum, Jonas Geiping, Tom Goldstein",
+    "link": "https://arxiv.org/abs/2401.12070"
+  },
+  {
+    "key": "coco",
+    "detector": "coco",
+    "name": "CoCo",
+    "type": "Fine-tuned",
+    "description": "Coherence-enhanced contrastive learning for low-resource MGT detection",
+    "paper": "CoCo: Coherence-Enhanced Machine-Generated Text Detection Under Low Resource With Contrastive Learning",
+    "authors": "Xiaoming Liu, Zhaohan Zhang, Yichen Wang, Hang Pu, Yu Lan, Chao Shen",
+    "link": "https://aclanthology.org/2023.emnlp-main.1005/"
+  },
+  {
+    "key": "detectgpt",
+    "detector": "detectgpt",
+    "name": "DetectGPT",
+    "type": "Metric-based",
+    "description": "Probability curvature detection using perturbations",
+    "paper": "DetectGPT: Zero-Shot Machine-Generated Text Detection using Probability Curvature",
+    "authors": "Eric Mitchell, Yoonho Lee, Alexander Khazatsky, Christopher D. Manning, Chelsea Finn",
+    "link": "https://arxiv.org/abs/2301.11305"
+  },
+  {
+    "key": "detective",
+    "detector": "detective",
+    "name": "DeTeCtive",
+    "type": "Fine-tuned",
+    "description": "Multi-level contrastive learning for AI-generated text detection",
+    "paper": "DeTeCtive: Detecting AI-generated Text via Multi-Level Contrastive Learning",
+    "authors": "Xun Guo, Shan Zhang, Yongxin He, Ting Zhang, Wanquan Feng, Haibin Huang, Chongyang Ma",
+    "link": "https://arxiv.org/abs/2410.13964"
+  },
+  {
+    "key": "dnadetectllm",
+    "detector": "dnadetectllm",
+    "name": "DNA-DetectLLM",
+    "type": "Metric-based",
+    "description": "DNA-based detection for large language models",
+    "paper": "DNA-DetectLLM: Unveiling AI-Generated Text via a DNA-Inspired Mutation-Repair Paradigm",
+    "authors": "Xiaowei Zhu, Yubing Ren, Fang Fang, Qingfeng Tan, Shi Wang, Yanan Cao",
+    "link": "https://openreview.net/forum?id=yQoHUijSHx"
+  },
+  {
+    "key": "dnagpt",
+    "detector": "dnagpt",
+    "name": "DNA-GPT",
+    "type": "Metric-based",
+    "description": "DNA-style detection for GPT models",
+    "paper": "DNA-GPT: Divergent N-Gram Analysis for Training-Free Detection of GPT-Generated Text",
+    "authors": "Xianjun Yang, Wei Cheng, Yue Wu, Linda Petzold, William Yang Wang, Haifeng Chen",
+    "link": "https://arxiv.org/abs/2305.17359"
+  },
+  {
+    "key": "entropy",
+    "detector": "entropy",
+    "name": "Entropy",
+    "type": "Metric-based",
+    "description": "Entropy-based scoring",
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "fastdetectgpt",
+    "detector": "fastdetectgpt",
+    "name": "Fast-DetectGPT",
+    "type": "Metric-based",
+    "description": "Optimized DetectGPT with conditional probability curvature",
+    "paper": "Fast-DetectGPT: Efficient Detection of Machine-Generated Text via Sampling Discrepancy",
+    "authors": "Guangsheng Bao, Yanbin Zhao, Zhiyang Teng, Linyi Yang, Yue Zhang",
+    "link": "https://arxiv.org/abs/2310.05130"
+  },
+  {
+    "key": "finetuned",
+    "detector": "hfcls",
+    "name": "Finetuned",
+    "type": "Unknown",
+    "description": "No description available.",
+    "paper": null,
+    "authors": null,
+    "link": null
+  },
+  {
+    "key": "gltr",
+    "detector": "gltr",
+    "name": "GLTR",
+    "type": "Metric-based",
+    "description": "Giant Language Test Room - rank-based statistics",
+    "paper": "GLTR: Statistical Detection and Visualization of Generated Text",
+    "authors": "Sebastian Gehrmann, Hendrik Strobelt, Alexander M. Rush",
+    "link": "https://arxiv.org/abs/1906.04043"
+  },
+  {
+    "key": "greater",
+    "detector": "greater",
+    "name": "GREATER",
+    "type": "Fine-tuned",
+    "description": "Adversarial training for robust MGT detection",
+    "paper": "Iron Sharpens Iron: Defending Against Attacks in Machine-Generated Text Detection with Adversarial Training",
+    "authors": "Yuanfan Li, Zhaohan Zhang, Chengzhengxu Li, Chao Shen, Xiaoming Liu",
+    "link": "https://arxiv.org/abs/2502.12734"
+  },
+  {
+    "key": "lastde",
+    "detector": "lastde",
+    "name": "LASTDE",
+    "type": "Metric-based",
+    "description": "Last-layer hidden state detection",
+    "paper": "Training-free LLM-generated Text Detection by Mining Token Probability Sequences",
+    "authors": "Yihuai Xu, Yongwei Wang, Yifei Bi, Huangsen Cao, Zhouhan Lin, Yu Zhao, Fei Wu",
+    "link": "https://openreview.net/forum?id=vo4AHjowKi"
+  },
+  {
+    "key": "lastdepp",
+    "detector": "lastdepp",
+    "name": "LASTDE++",
+    "type": "Metric-based",
+    "description": "Enhanced LASTDE variant",
+    "paper": "Training-free LLM-generated Text Detection by Mining Token Probability Sequences",
+    "authors": "Yihuai Xu, Yongwei Wang, Yifei Bi, Huangsen Cao, Zhouhan Lin, Yu Zhao, Fei Wu",
+    "link": "https://openreview.net/forum?id=vo4AHjowKi"
+  },
+  {
+    "key": "likelihood",
+    "detector": "likelihood",
+    "name": "Likelihood",
+    "type": "Metric-based",
+    "description": "Log-probability scoring under language model",
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "logrank",
+    "detector": "logrank",
+    "name": "LogRank",
+    "type": "Metric-based",
+    "description": "Log-rank metric",
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "longformer",
+    "detector": "longformer",
+    "name": "Longformer",
+    "type": "Fine-tuned",
+    "description": "Long-document transformer classifier using Longformer backbone",
+    "paper": "Longformer: Long-Document Transformer",
+    "authors": "Beltagy et al.",
+    "link": null
+  },
+  {
+    "key": "lrr",
+    "detector": "lrr",
+    "name": "LRR",
+    "type": "Metric-based",
+    "description": "Likelihood Ratio with Rank",
+    "paper": "DetectLLM: Leveraging Log Rank Information for Zero-Shot Detection of Machine-Generated Text",
+    "authors": "Jinyan Su, Terry Yue Zhuo, Di Wang, Preslav Nakov",
+    "link": "https://arxiv.org/abs/2306.05540"
+  },
+  {
+    "key": "mpu",
+    "detector": "mpu",
+    "name": "MPU",
+    "type": "Fine-tuned",
+    "description": "Multiscale positive–unlabeled learning for short AI-text detection",
+    "paper": "Multiscale Positive-Unlabeled Detection of AI-Generated Texts",
+    "authors": "Yuchuan Tian, Hanting Chen, Xutao Wang, Zheyuan Bai, Qinghua Zhang, Ruifeng Li, Chao Xu, Yunhe Wang",
+    "link": "https://arxiv.org/abs/2305.18149"
+  },
+  {
+    "key": "npr",
+    "detector": "npr",
+    "name": "NPR",
+    "type": "Metric-based",
+    "description": "Nested Prediction Ratio",
+    "paper": "DetectLLM: Leveraging Log Rank Information for Zero-Shot Detection of Machine-Generated Text",
+    "authors": "Jinyan Su, Terry Yue Zhuo, Di Wang, Preslav Nakov",
+    "link": "https://arxiv.org/abs/2306.05540"
+  },
+  {
+    "key": "pecola",
+    "detector": "pecola",
+    "name": "PECOLA",
+    "type": "Fine-tuned",
+    "description": "Fine-tuned contrastive learning with selective perturbation",
+    "paper": "Does DETECTGPT Fully Utilize Perturbation? Bridging Selective Perturbation to Fine-tuned Contrastive Learning Detector would be Better",
+    "authors": "Shengchao Liu, Xiaoming Liu*, Yichen Wang, Zehua Cheng, Chengzhengxu Li, Yu Lan, Chao Shen",
+    "link": "https://arxiv.org/abs/2402.00263"
+  },
+  {
+    "key": "raidar",
+    "detector": "raidar",
+    "name": "RAIDAR",
+    "type": "Metric-based",
+    "description": "Radar-based detection method",
+    "paper": "Raidar: geneRative AI Detection viA Rewriting",
+    "authors": "Chengzhi Mao, Carl Vondrick, Hao Wang, Junfeng Yang",
+    "link": "https://arxiv.org/abs/2401.12970"
+  },
+  {
+    "key": "rank",
+    "detector": "rank",
+    "name": "Rank",
+    "type": "Metric-based",
+    "description": "Token rank statistics",
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "tocsin",
+    "detector": "tocsin",
+    "name": "TOCSIN",
+    "type": "Metric-based",
+    "description": "Token-level OCR-based detection",
+    "paper": "Zero-Shot Detection of LLM-Generated Text using Token Cohesiveness",
+    "authors": "Shixuan Ma, Quan Wang",
+    "link": "https://arxiv.org/abs/2409.16914"
+  }
+]

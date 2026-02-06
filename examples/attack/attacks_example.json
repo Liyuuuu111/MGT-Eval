@@ -1,0 +1,103 @@
+{
+  "text_attacks": [
+    {
+      "type": "para",
+      "backend": "pegasus",
+      "model": "tuner007/pegasus_paraphrase",
+      "top_p": 0.96,
+      "temperature": 1.0,
+      "max_length": 60,
+      "sent_batch_size": 64,
+      "n_variants": 1,
+      "device": "cuda",
+      "cache_dir": null,
+      "dtype": "bf16"
+    },
+    {
+      "type": "typo",
+      "mode": "mix",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "inse",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "dele",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "subs",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "tran",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "homo",
+      "variant": "ECES",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "form",
+      "variant": "zero-sp",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "syno",
+      "backend": "modelfree",
+      "pct_words_masked": 0.6,
+      "n_variants": 1
+    },
+    {
+      "type": "back_trans",
+      "pivot_lang": "auto",
+      "src_lang": null,
+      "pivot_for_en": "de",
+      "pivot_for_non_en": "en",
+      "n_rounds": 1,
+      "n_variants": 1,
+      "num_beams": 5,
+      "do_sample": false,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "max_length": 512,
+      "device": "cuda",
+      "cache_dir": null,
+      "dtype": "bf16"
+    },
+    {
+      "type": "humanize",
+      "backend": "hf",
+      "n_pairs": 3,
+      "max_input_tokens": 4096,
+      "max_output_tokens": 512,
+      "temperature": 0.9,
+      "top_p": 0.95,
+      "n_variants": 1,
+      "model": "/home/hqdeng7/zhouqi/meta-llama/Llama-3.2-3B-Instruct",
+      "do_sample": true,
+      "top_k": 50,
+      "device": "cuda",
+      "vllm_batch_size": 64,    
+      "cache_dir": null,
+      "dtype": "bf16",
+      "use_vllm": true,
+      "vllm_gpu_memory_utilization": 0.9,
+      "vllm_max_model_len": null,
+      "vllm_dtype": null,
+      "vllm_tensor_parallel_size": 1,
+      "vllm_enforce_eager": false,
+      "vllm_trust_remote_code": false,
+      "vllm_disable_log_stats": true
+    }
+  ]
+}

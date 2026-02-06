@@ -1,0 +1,17 @@
+detector: hfcls
+data: data/arxiv.qwen3_4b.test.jsonl
+model1: runs_hfcls/hfcls_roberta-base_YYYYMMDD-HHMMSS/best
+tokenizer: null
+ckpt_base: null
+lora_dir: null
+batch_size: 8
+threshold: 0.5
+seed: 114514
+sample_k: 2000
+device: 'cuda:0'
+max_length: 512
+fp16: true
+out: 'runs/hfcls'
+save_curves: true
+no_progress: false
+k_runs: 1

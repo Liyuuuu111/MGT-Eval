@@ -1,0 +1,25 @@
+detector: pecola
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_val: null
+dataset_test: null
+sample_k_train: 128
+sample_k_val: 500
+sample_k_test: 1000
+model1: albert/albert-base-v2
+model2: t5-small
+output_dir: models/runs_pecola
+seed: 114514
+epochs: 30
+train_batch_size: 16
+eval_batch_size: 32
+lr: 1e-5
+weight_decay: 0.01
+train_kwargs:
+  prob: 0.10
+  ratio: 0.05
+  skip_number: 2
+  loss_type: margin_weight
+  scl_reg: 0.9
+  shift_reg: 0.0
+  cache_dir: ~/.cache/mgt_eval/pecola
+  lang: en

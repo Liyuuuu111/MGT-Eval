@@ -1,0 +1,66 @@
+{
+  "calibrator": {
+    "name": "linear_lr",
+    "beta": [
+      -1.529160594771396,
+      2.452083478967913,
+      -2.733147165521766,
+      -2.0652738683118326,
+      0.16275396791279012
+    ],
+    "standardize": true,
+    "mean": [
+      0.7967048603389412,
+      0.1384223957923241,
+      0.04861703325755661,
+      0.016005713076272514
+    ],
+    "std": [
+      0.1384413333887296,
+      0.08205993800559923,
+      0.05314015362801439,
+      0.026466690567317774
+    ],
+    "threshold_raw_p05": null
+  },
+  "meta": {
+    "detector": "GLTR[GPT-Neo-2.7B]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 4000,
+      "pos": 2000,
+      "neg": 2000,
+      "auroc_on_scores": null,
+      "metrics_on_probs": {
+        "acc": 0.97425,
+        "precision": 0.970252850768468,
+        "recall": 0.9785,
+        "f1": 0.9743589743589745,
+        "confusion": {
+          "tp": 1957,
+          "tn": 1940,
+          "fp": 60,
+          "fn": 43
+        },
+        "num_samples": 4000,
+        "num_pos": 2000,
+        "num_neg": 2000,
+        "auroc": 0.9918821249999958,
+        "aupr": 0.9926113035224957
+      },
+      "feature_dim": 4
+    },
+    "models": {
+      "model1": "/home/lyf/models/GPT-Neo-2.7B",
+      "model2": null
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "linear_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

@@ -1,0 +1,30 @@
+detector: detectgpt
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+sample_k_train: 0
+seed: 114514
+train_batch_size: 32
+device: 'cuda:0'
+calibrator_name: platt_lr
+l2: 0.01
+max_iter: 200
+tol: 1e-06
+no_standardize: false
+mode: acc
+out: null
+out_dir: calibration_results
+no_progress: false
+model1: EleutherAI/gpt-neo-125m
+model2: google-t5/t5-small
+detector_kwargs:
+  pct_words_masked: 0.3
+  span_length: 2
+  n_perturbations: 10
+  buffer_size: 1
+  mask_top_p: 1.0
+  use_bfloat16: true
+  max_token_observed: 512
+  use_zscore: false
+  device: 'cuda:0'
+  chunk_size: 20
+  eval_max_tokens: 512
+  perturb_max_tokens: 512

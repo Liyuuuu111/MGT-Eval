@@ -1,0 +1,51 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.601989785983091,
+    "beta1": -3.9865163533731125,
+    "standardize": true,
+    "mean": 2.696908203125,
+    "std": 0.6782282389754033,
+    "threshold_raw_p05": 2.594491346843192
+  },
+  "meta": {
+    "detector": "EntropyDetector[GPT-Neo-2.7B]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 4000,
+      "pos": 2000,
+      "neg": 2000,
+      "auroc_on_scores": 0.04435849999999998,
+      "metrics_on_probs": {
+        "acc": 0.9115,
+        "precision": 0.895673076923077,
+        "recall": 0.9315,
+        "f1": 0.913235294117647,
+        "confusion": {
+          "tp": 1863,
+          "tn": 1783,
+          "fp": 217,
+          "fn": 137
+        },
+        "num_samples": 4000,
+        "num_pos": 2000,
+        "num_neg": 2000,
+        "auroc": 0.9556415000000011,
+        "aupr": 0.9395049020252048
+      },
+      "feature_dim": 1
+    },
+    "models": {
+      "model1": "/home/lyf/models/GPT-Neo-2.7B",
+      "model2": null
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

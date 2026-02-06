@@ -1,0 +1,51 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.24011353967308635,
+    "beta1": 6.195910778623623,
+    "standardize": true,
+    "mean": -0.8116094104498625,
+    "std": 0.18366056808666884,
+    "threshold_raw_p05": -0.8044919113964858
+  },
+  "meta": {
+    "detector": "Binoculars[falcon-7b|falcon-7b-instruct]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 4000,
+      "pos": 2000,
+      "neg": 2000,
+      "auroc_on_scores": 0.9919960000000075,
+      "metrics_on_probs": {
+        "acc": 0.982,
+        "precision": 0.9786494538232373,
+        "recall": 0.9855,
+        "f1": 0.9820627802690584,
+        "confusion": {
+          "tp": 1971,
+          "tn": 1957,
+          "fp": 43,
+          "fn": 29
+        },
+        "num_samples": 4000,
+        "num_pos": 2000,
+        "num_neg": 2000,
+        "auroc": 0.9919960000000075,
+        "aupr": 0.9890008179984648
+      },
+      "feature_dim": 1
+    },
+    "models": {
+      "model1": "/home/lyf/models/falcon-7b",
+      "model2": "/home/lyf/models/falcon-7b-instruct"
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}
