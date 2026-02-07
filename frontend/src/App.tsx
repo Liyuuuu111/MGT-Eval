@@ -17,6 +17,7 @@ import { TrainSection } from './components/Train/TrainSection';
 import { DetectSection } from './components/Detect/DetectSection';
 import { DemoSection } from './components/Demo/DemoSection';
 import { SystemMonitorPanel } from './components/Shared/SystemMonitorPanel';
+import { LanguageSwitcher } from './components/Shared/LanguageSwitcher';
 import { useStore } from './store';
 import api from './services/api';
 
@@ -26,7 +27,7 @@ const { Title } = Typography;
 type SectionKey = 'build' | 'attack' | 'train' | 'detect' | 'demo';
 
 const App: React.FC = () => {
-  const [activeSection, setActiveSection] = useState<SectionKey>('build');
+  const [activeSection, setActiveSection] = useState<SectionKey>('demo');
   const [backendStatus, setBackendStatus] = useState<{
     connected: boolean | null;
     latencyMs: number | null;
@@ -164,11 +165,11 @@ const App: React.FC = () => {
   };
 
   const menuItems = [
+    { key: 'demo', icon: <PlayCircleOutlined />, label: 'Demo' },
     { key: 'build', icon: <BuildOutlined />, label: 'Build Dataset' },
     { key: 'attack', icon: <BugOutlined />, label: 'Attack Dataset' },
     { key: 'train', icon: <ExperimentOutlined />, label: 'Train Detector' },
     { key: 'detect', icon: <EyeOutlined />, label: 'Detect' },
-    { key: 'demo', icon: <PlayCircleOutlined />, label: 'Demo' },
   ];
 
   const renderSection = () => {
@@ -192,12 +193,13 @@ const App: React.FC = () => {
     <Layout style={{ minHeight: '100vh' }}>
       <Header
         style={{
-          background: '#001529',
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
           padding: '0 24px',
           position: 'fixed',
           width: '100%',
           zIndex: 1000,
-          top: 0
+          top: 0,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '100%' }}>
@@ -217,6 +219,7 @@ const App: React.FC = () => {
                 Latency: {backendStatus.connected ? `${backendStatus.latencyMs ?? '-'} ms` : '-'}
               </span>
             </div>
+            <LanguageSwitcher />
             <Button danger disabled={!hasRunningJob} onClick={handleStopRunning}>
               Stop Current Job
             </Button>

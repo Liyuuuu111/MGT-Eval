@@ -10,7 +10,10 @@ import { GPUSelector } from '../Shared/GPUSelector';
 import { DynamicFormFields } from '../Shared/DynamicFormFields';
 import { ModelDownloadStatus } from '../Shared/ModelDownloadStatus';
 import { HFTokenInput } from '../Shared/HFTokenInput';
+import { HFMirrorSuggestion } from '../Shared/HFMirrorSuggestion';
+import { FieldHelpText } from '../Shared/FieldHelpText';
 import { useWebSocket } from '../../hooks/useWebSocket';
+import { useUILanguage } from '../../hooks/useUILanguage';
 import api from '../../services/api';
 
 // Helper function to split config keys for balanced layout
@@ -33,6 +36,32 @@ export const BuildSection: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [templateConfig, setTemplateConfig] = useState<any>(null);
   const [hfEndpoint, setHfEndpoint] = useState<string>('');
+  const { language } = useUILanguage();
+
+  const isLikelyInChina = useMemo(() => {
+    const nav = window.navigator;
+    const langs = [nav.language, ...(nav.languages || [])]
+      .filter(Boolean)
+      .map((s) => String(s).toLowerCase());
+    const hasZhLocale = langs.some((l) => l.startsWith('zh') || l.includes('zh-'));
+    let tz = '';
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    } catch {
+      tz = '';
+    }
+    const tzLower = tz.toLowerCase();
+    const chinaFriendlyTz = new Set([
+      'asia/shanghai',
+      'asia/chongqing',
+      'asia/harbin',
+      'asia/urumqi',
+      'asia/hong_kong',
+      'asia/macau',
+      'asia/taipei',
+    ]);
+    return hasZhLocale || chinaFriendlyTz.has(tzLower);
+  }, []);
 
   const {
     buildLogs,
@@ -45,7 +74,7 @@ export const BuildSection: React.FC = () => {
     hfToken,
   } = useStore();
 
-  useWebSocket({ jobId: buildJobId, section: 'build' });
+  useWebSocket({ jobId: buildJobId, section: 'build', isRunning: isBuildRunning });
 
   // Dynamically split config keys for balanced layout
   const { leftKeys, rightKeys } = useMemo(() => {
@@ -125,15 +154,27 @@ export const BuildSection: React.FC = () => {
               <>
                 <Divider orientation="left">System Resources</Divider>
 
-                <Form.Item name="gpu_ids" label="GPU Selection">
+                <Form.Item
+                  name="gpu_ids"
+                  label="GPU Selection"
+                  extra={<FieldHelpText path="gpu_ids" value={form.getFieldValue('gpu_ids')} />}
+                >
                   <GPUSelector mode="multiple" />
                 </Form.Item>
 
-                <Form.Item label="HF Download Source">
+                <Form.Item
+                  label="HF Download Source"
+                  extra={<FieldHelpText path="hf_endpoint" value={hfEndpoint} />}
+                >
                   <Select value={hfEndpoint} onChange={setHfEndpoint}>
                     <Select.Option value="">Official (huggingface.co)</Select.Option>
                     <Select.Option value="https://hf-mirror.com">HF Mirror (hf-mirror.com)</Select.Option>
                   </Select>
+                  <HFMirrorSuggestion
+                    language={language}
+                    show={isLikelyInChina && !hfEndpoint}
+                    onUseMirror={() => setHfEndpoint('https://hf-mirror.com')}
+                  />
                 </Form.Item>
                 <HFTokenInput disabled={isBuildRunning} />
 
@@ -142,6 +183,7 @@ export const BuildSection: React.FC = () => {
                 <Form.Item
                   name="data"
                   label="Input Data"
+                  extra={<FieldHelpText path="data" value={form.getFieldValue('data')} />}
                   rules={[{ required: true, message: 'Input data is required' }]}
                 >
                   <Input placeholder="data/input.jsonl" />
@@ -150,6 +192,7 @@ export const BuildSection: React.FC = () => {
                 <Form.Item
                   name="out"
                   label="Output File"
+                  extra={<FieldHelpText path="out" value={form.getFieldValue('out')} />}
                   rules={[{ required: true, message: 'Output file is required' }]}
                 >
                   <Input placeholder="data/output.jsonl" />

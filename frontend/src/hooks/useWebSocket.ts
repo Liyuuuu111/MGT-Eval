@@ -9,9 +9,27 @@ import { Section } from '../types';
 interface UseWebSocketOptions {
   jobId: string | null;
   section: Section;
+  isRunning: boolean;
 }
 
-export const useWebSocket = ({ jobId, section }: UseWebSocketOptions) => {
+const resetSocketHandlers = (socket: WebSocket) => {
+  socket.onopen = null;
+  socket.onmessage = null;
+  socket.onerror = null;
+  socket.onclose = null;
+};
+
+const closeSocketIfActive = (socket: WebSocket | null) => {
+  if (!socket) {
+    return;
+  }
+  if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+    resetSocketHandlers(socket);
+    socket.close();
+  }
+};
+
+export const useWebSocket = ({ jobId, section, isRunning }: UseWebSocketOptions) => {
   const wsRef = useRef<WebSocket | null>(null);
 
   const addLog = useStore((state) => {
@@ -45,7 +63,14 @@ export const useWebSocket = ({ jobId, section }: UseWebSocketOptions) => {
   });
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId || !isRunning) {
+      closeSocketIfActive(wsRef.current);
+      wsRef.current = null;
+      return;
+    }
+
+    closeSocketIfActive(wsRef.current);
+    wsRef.current = null;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/ws/logs/${jobId}`;
@@ -58,7 +83,13 @@ export const useWebSocket = ({ jobId, section }: UseWebSocketOptions) => {
     };
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      let data: any;
+      try {
+        data = JSON.parse(event.data);
+      } catch (error) {
+        console.warn('Ignoring malformed WebSocket payload:', error);
+        return;
+      }
 
       if (data.type === 'log') {
         addLog({
@@ -104,11 +135,15 @@ export const useWebSocket = ({ jobId, section }: UseWebSocketOptions) => {
     };
 
     return () => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+        resetSocketHandlers(ws);
         ws.close();
       }
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
     };
-  }, [jobId, addLog, stopJob]);
+  }, [jobId, section, isRunning, addLog, stopJob]);
 
   return wsRef;
 };

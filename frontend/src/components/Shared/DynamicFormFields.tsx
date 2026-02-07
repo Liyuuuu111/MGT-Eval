@@ -7,6 +7,8 @@ import React from 'react';
 import { Form, Input, InputNumber, Switch, Select, Collapse } from 'antd';
 import { ModelSelector } from './ModelSelector';
 import { CalibratorSelector } from './CalibratorSelector';
+import { FieldHelpText } from './FieldHelpText';
+import { getDetectorModelRole, isModelFieldKey } from '../../config/detectorModelRoles';
 
 const { Panel } = Collapse;
 
@@ -16,6 +18,7 @@ interface DynamicFormFieldsProps {
   excludeKeys?: string[];
   includeKeys?: string[];  // If provided, only render these keys
   modelFields?: string[];
+  rootContext?: Record<string, unknown>;
 }
 
 export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
@@ -23,14 +26,17 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
   prefix = [],
   excludeKeys = [],
   includeKeys,
-  modelFields = ['model', 'model1', 'model2', 'model3', 'hf_model', 'api_model', 'ppl_model', 'bertscore_model']
+  modelFields = ['model', 'model1', 'model2', 'model3', 'hf_model', 'api_model', 'ppl_model', 'bertscore_model'],
+  rootContext,
 }) => {
   if (!data || typeof data !== 'object') {
     return null;
   }
 
+  const effectiveRootContext: Record<string, unknown> =
+    rootContext ?? (typeof data === 'object' && data !== null ? data : {});
+
   const binaryFieldKeys = new Set([
-    'prompt_from_label',
     'only_human_prompts',
     'do_sample',
     'return_full_text',
@@ -43,11 +49,50 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
     'only_attack_machine',
   ]);
 
+  const getNumberInputSpec = (fieldPath: string, key: string, value: number): {
+    step: number;
+    precision?: number;
+  } => {
+    const normalized = `${fieldPath}.${key}`.toLowerCase();
+
+    const integerLikePattern =
+      /(token|tokens|steps?|epochs?|batch|num_|_num|k_runs|sample_k|seed|workers?|top_k|num_beams|max_new_tokens|min_new_tokens|max_length|min_length|prefix_k_tokens|write_every|retry|count|n_variants|n_pairs|span_length|chunk_size|max_prompts|gpu_ids|gcn_layers|max_nodes_num|tensor_parallel_size)/;
+    const floatLikePattern =
+      /(temperature|top_p|learning_rate|(^|_)lr($|_)|dropout|penalty|alpha|beta|gamma|weight_decay|threshold|ratio|pct|prob|confidence)/;
+
+    if (integerLikePattern.test(normalized)) {
+      return { step: 1, precision: 0 };
+    }
+
+    if (floatLikePattern.test(normalized)) {
+      if (/(^|_)lr($|_)|learning_rate/.test(normalized)) {
+        return { step: 0.001, precision: 4 };
+      }
+      return { step: 0.01, precision: 3 };
+    }
+
+    if (Number.isInteger(value)) {
+      return { step: 1, precision: 0 };
+    }
+
+    return { step: 0.01, precision: 3 };
+  };
+
   const renderField = (key: string, value: any, currentPrefix: string[]) => {
     const fieldName = [...currentPrefix, key];
     const fieldPath = fieldName.join('.');
     const keyLower = key.toLowerCase();
     const isBinaryField = binaryFieldKeys.has(keyLower);
+    const detectorValue = typeof effectiveRootContext.detector === 'string' ? effectiveRootContext.detector : null;
+    const modelRole = isModelFieldKey(keyLower) ? getDetectorModelRole(detectorValue, keyLower) : undefined;
+    const resolvedLabel = modelRole ? `${formatLabel(key)} (${modelRole.label})` : formatLabel(key);
+    const fieldHelp = (
+      <FieldHelpText
+        path={fieldPath}
+        value={value}
+        context={effectiveRootContext}
+      />
+    );
 
     // If includeKeys is provided, only render those keys
     if (includeKeys && !includeKeys.includes(key)) {
@@ -65,9 +110,26 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
         <Form.Item
           key={fieldPath}
           name={fieldName}
-          label={formatLabel(key)}
+          label={resolvedLabel}
+          extra={fieldHelp}
         >
           <Input placeholder="null" />
+        </Form.Item>
+      );
+    }
+
+    if (keyLower === 'only_human_prompts') {
+      return (
+        <Form.Item
+          key={fieldPath}
+          name={fieldName}
+          label={resolvedLabel}
+          extra={fieldHelp}
+        >
+          <Select>
+            <Select.Option value={1}>1 (Force Human Prompts)</Select.Option>
+            <Select.Option value={0}>0 (Use prompt_from_label)</Select.Option>
+          </Select>
         </Form.Item>
       );
     }
@@ -78,8 +140,9 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
         <Form.Item
           key={fieldPath}
           name={fieldName}
-          label={formatLabel(key)}
+          label={resolvedLabel}
           tooltip="0 = False, 1 = True"
+          extra={fieldHelp}
           normalize={(inputValue: any) => {
             if (inputValue === null || inputValue === undefined || inputValue === '') {
               return inputValue;
@@ -103,8 +166,9 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
         <Form.Item
           key={fieldPath}
           name={fieldName}
-          label={formatLabel(key)}
+          label={resolvedLabel}
           valuePropName="checked"
+          extra={fieldHelp}
         >
           <Switch />
         </Form.Item>
@@ -113,25 +177,49 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
 
     // Handle number
     if (typeof value === 'number') {
+      const numberSpec = getNumberInputSpec(fieldPath, keyLower, value);
       return (
         <Form.Item
           key={fieldPath}
           name={fieldName}
-          label={formatLabel(key)}
+          label={resolvedLabel}
+          extra={fieldHelp}
         >
-          <InputNumber style={{ width: '100%' }} step={value < 1 ? 0.01 : 1} />
+          <InputNumber
+            style={{ width: '100%' }}
+            step={numberSpec.step}
+            precision={numberSpec.precision}
+          />
         </Form.Item>
       );
     }
 
     // Handle string - check if it's a model field
     if (typeof value === 'string') {
+      // Enumerated field: machine_text_mode
+      if (keyLower === 'machine_text_mode') {
+        return (
+          <Form.Item
+            key={fieldPath}
+            name={fieldName}
+            label={resolvedLabel}
+            extra={fieldHelp}
+          >
+            <Select>
+              <Select.Option value="prompt_plus">prompt_plus</Select.Option>
+              <Select.Option value="completion_only">completion_only</Select.Option>
+            </Select>
+          </Form.Item>
+        );
+      }
+
       if (keyLower === 'calibrator_path' || keyLower === 'calibrator') {
         return (
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <CalibratorSelector allowManual />
           </Form.Item>
@@ -144,7 +232,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <ModelSelector allowManual />
           </Form.Item>
@@ -157,7 +246,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <Select>
               <Select.Option value="cuda">cuda</Select.Option>
@@ -176,7 +266,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <Select>
               <Select.Option value="auto">auto</Select.Option>
@@ -195,7 +286,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <Select>
               <Select.Option value="hf">hf</Select.Option>
@@ -216,7 +308,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <Input />
           </Form.Item>
@@ -229,7 +322,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
+            extra={fieldHelp}
           >
             <Input.TextArea rows={4} />
           </Form.Item>
@@ -241,7 +335,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
         <Form.Item
           key={fieldPath}
           name={fieldName}
-          label={formatLabel(key)}
+          label={resolvedLabel}
+          extra={fieldHelp}
         >
           <Input />
         </Form.Item>
@@ -256,8 +351,9 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           <Form.Item
             key={fieldPath}
             name={fieldName}
-            label={formatLabel(key)}
+            label={resolvedLabel}
             tooltip="Enter comma-separated values"
+            extra={fieldHelp}
           >
             <Input placeholder="value1, value2, value3" />
           </Form.Item>
@@ -282,6 +378,7 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
                 prefix={fieldName}
                 excludeKeys={excludeKeys}
                 modelFields={modelFields}
+                rootContext={effectiveRootContext}
               />
             </Panel>
           </Collapse>
@@ -295,6 +392,7 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
   const formatLabel = (key: string): string => {
     // Convert snake_case to Title Case
     return key
+      .replace(/([a-zA-Z])(\d+)/g, '$1 $2')
       .split('_')
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ');

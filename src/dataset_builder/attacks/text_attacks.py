@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, ClassVar
+import importlib
+import importlib.util
 import os
+from pathlib import Path
 import re
 import time
 
@@ -1187,6 +1190,62 @@ class ChatGPTParaphraseAttack(APIPromptParaphraseAttack):
 # -----------------------
 # word_subst_modelbase (keep original behavior by delegating to your existing module)
 # -----------------------
+_WORD_SUBST_IMPL = None
+
+
+def _resolve_word_subst_modelbase_impl():
+    """
+    Resolve generate_attack_with_lm_replacement from multiple possible module layouts:
+    1) Original external package: attacks.word_subst_modelbase
+    2) In-repo package path(s)
+    3) Direct file fallback from this repository tree
+    """
+    global _WORD_SUBST_IMPL
+    if callable(_WORD_SUBST_IMPL):
+        return _WORD_SUBST_IMPL
+
+    last_err: Optional[Exception] = None
+    candidates = [
+        "attacks.word_subst_modelbase",
+        "dataset_builder.attacks.attacks.word_subst_modelbase",
+        "mgt_eval.dataset_builder.attacks.attacks.word_subst_modelbase",
+    ]
+
+    for mod_name in candidates:
+        try:
+            mod = importlib.import_module(mod_name)
+            fn = getattr(mod, "generate_attack_with_lm_replacement", None)
+            if callable(fn):
+                _WORD_SUBST_IMPL = fn
+                return fn
+        except Exception as e:
+            last_err = e
+
+    # final fallback: load local file directly
+    try:
+        local_file = Path(__file__).resolve().parent / "attacks" / "word_subst_modelbase.py"
+        if local_file.exists():
+            spec = importlib.util.spec_from_file_location(
+                "dataset_builder.attacks._word_subst_modelbase_local",
+                str(local_file),
+            )
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+                fn = getattr(mod, "generate_attack_with_lm_replacement", None)
+                if callable(fn):
+                    _WORD_SUBST_IMPL = fn
+                    return fn
+    except Exception as e:
+        last_err = e
+
+    raise RuntimeError(
+        "word_subst_modelbase implementation not found. Tried: "
+        + ", ".join(candidates)
+        + " and local file dataset_builder/attacks/attacks/word_subst_modelbase.py"
+    ) from last_err
+
+
 @dataclass
 class WordSubstModelBaseAttack:
     """
@@ -1224,14 +1283,8 @@ class WordSubstModelBaseAttack:
         text = (text or "").strip()
         if not text:
             return []
-        try:
-            from attacks.word_subst_modelbase import generate_attack_with_lm_replacement  # type: ignore
-        except Exception as e:
-            raise RuntimeError(
-                "word_subst_modelbase requires your original implementation: "
-                "`attacks.word_subst_modelbase.generate_attack_with_lm_replacement`. "
-                "Please ensure it exists in PYTHONPATH."
-            ) from e
+
+        generate_attack_with_lm_replacement = _resolve_word_subst_modelbase_impl()
 
         self._load()
 

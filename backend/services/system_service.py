@@ -33,61 +33,234 @@ class SystemService:
 
     def detect_gpus(self) -> List[Dict[str, Any]]:
         """
-        Detect available GPUs using nvidia-smi
+        Detect available GPUs with robust fallback:
+        1) NVML (pynvml) -> 2) nvidia-smi -> 3) torch.cuda
 
         Returns:
             List of GPU information dictionaries
         """
+        metrics = self._detect_gpu_metrics()
+        gpus: List[Dict[str, Any]] = []
+
+        for item in metrics:
+            memory_total_mb = self._to_float(item.get("memory_total_mb"))
+            memory_free_mb = self._to_float(item.get("memory_free_mb"))
+            memory_used_mb = self._to_float(item.get("memory_used_mb"))
+            utilization = self._to_float(item.get("utilization"))
+
+            if memory_free_mb is None and memory_total_mb is not None and memory_used_mb is not None:
+                memory_free_mb = max(0.0, memory_total_mb - memory_used_mb)
+
+            if utilization is None and memory_total_mb and memory_used_mb is not None and memory_total_mb > 0:
+                utilization = min(100.0, max(0.0, (memory_used_mb / memory_total_mb) * 100.0))
+
+            available = True
+            if utilization is not None:
+                available = utilization < 90.0
+            elif memory_total_mb and memory_free_mb is not None and memory_total_mb > 0:
+                available = (memory_free_mb / memory_total_mb) > 0.05
+
+            gpus.append({
+                "id": int(item.get("index", 0)),
+                "name": str(item.get("name", "Unknown GPU")),
+                "memory_total": f"{int(memory_total_mb)} MB" if memory_total_mb is not None else "N/A",
+                "memory_free": f"{int(memory_free_mb)} MB" if memory_free_mb is not None else "N/A",
+                "utilization": f"{int(utilization)}%" if utilization is not None else "N/A",
+                "available": available,
+            })
+
+        return gpus
+
+    def detect_gpu_monitor_stats(self) -> List[Dict[str, Any]]:
+        """
+        Detect GPU monitor stats for /system/monitor endpoint with the same fallback chain.
+        Unknown fields are normalized to 0 to keep response schema stable.
+        """
+        metrics = self._detect_gpu_metrics()
+        rows: List[Dict[str, Any]] = []
+
+        for item in metrics:
+            memory_total_mb = self._to_float(item.get("memory_total_mb")) or 0.0
+            memory_used_mb = self._to_float(item.get("memory_used_mb"))
+            memory_free_mb = self._to_float(item.get("memory_free_mb"))
+            utilization = self._to_float(item.get("utilization"))
+            temperature = self._to_float(item.get("temperature"))
+
+            if memory_used_mb is None and memory_free_mb is not None and memory_total_mb > 0:
+                memory_used_mb = max(0.0, memory_total_mb - memory_free_mb)
+            if memory_used_mb is None:
+                memory_used_mb = 0.0
+
+            if utilization is None and memory_total_mb > 0:
+                utilization = min(100.0, max(0.0, (memory_used_mb / memory_total_mb) * 100.0))
+            if utilization is None:
+                utilization = 0.0
+
+            if temperature is None:
+                temperature = 0.0
+
+            rows.append({
+                "index": int(item.get("index", 0)),
+                "name": str(item.get("name", "Unknown GPU")),
+                "utilization": float(round(utilization, 2)),
+                "memory_used_mb": float(round(memory_used_mb, 2)),
+                "memory_total_mb": float(round(memory_total_mb, 2)),
+                "temperature": float(round(temperature, 2)),
+            })
+
+        return rows
+
+    def _detect_gpu_metrics(self) -> List[Dict[str, Any]]:
+        """
+        Internal unified GPU probe with fallback.
+        Each row may contain:
+        index, name, memory_total_mb, memory_free_mb, memory_used_mb, utilization, temperature, source
+        """
+        probes = (
+            self._detect_gpu_metrics_via_nvml,
+            self._detect_gpu_metrics_via_nvidia_smi,
+            self._detect_gpu_metrics_via_torch,
+        )
+        for probe in probes:
+            rows = probe()
+            if rows:
+                return rows
+        return []
+
+    def _detect_gpu_metrics_via_nvml(self) -> List[Dict[str, Any]]:
+        """Preferred probe: pynvml (works even when nvidia-smi binary is absent)."""
         try:
-            # Try nvidia-smi first
+            from pynvml import (
+                NVML_TEMPERATURE_GPU,
+                nvmlDeviceGetCount,
+                nvmlDeviceGetHandleByIndex,
+                nvmlDeviceGetMemoryInfo,
+                nvmlDeviceGetName,
+                nvmlDeviceGetTemperature,
+                nvmlDeviceGetUtilizationRates,
+                nvmlInit,
+                nvmlShutdown,
+            )
+        except Exception:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        initialized = False
+        try:
+            nvmlInit()
+            initialized = True
+            for index in range(int(nvmlDeviceGetCount())):
+                handle = nvmlDeviceGetHandleByIndex(index)
+                name = nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8", errors="replace")
+                mem = nvmlDeviceGetMemoryInfo(handle)
+                util = nvmlDeviceGetUtilizationRates(handle)
+                try:
+                    temperature = float(nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU))
+                except Exception:
+                    temperature = None
+
+                rows.append({
+                    "index": index,
+                    "name": str(name),
+                    "memory_total_mb": mem.total / (1024 ** 2),
+                    "memory_used_mb": mem.used / (1024 ** 2),
+                    "memory_free_mb": mem.free / (1024 ** 2),
+                    "utilization": float(util.gpu),
+                    "temperature": temperature,
+                    "source": "nvml",
+                })
+        except Exception:
+            rows = []
+        finally:
+            if initialized:
+                try:
+                    nvmlShutdown()
+                except Exception:
+                    pass
+        return rows
+
+    def _detect_gpu_metrics_via_nvidia_smi(self) -> List[Dict[str, Any]]:
+        """Fallback probe: nvidia-smi command."""
+        try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free,utilization.gpu",
-                 "--format=csv,noheader,nounits"],
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,name,utilization.gpu,memory.total,memory.free,memory.used,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=3,
             )
-
-            if result.returncode == 0:
-                gpus = []
-                for line in result.stdout.strip().split('\n'):
-                    if line:
-                        parts = [p.strip() for p in line.split(',')]
-                        if len(parts) >= 5:
-                            gpus.append({
-                                "id": int(parts[0]),
-                                "name": parts[1],
-                                "memory_total": f"{parts[2]} MB",
-                                "memory_free": f"{parts[3]} MB",
-                                "utilization": f"{parts[4]}%",
-                                "available": int(parts[4]) < 90  # Consider available if < 90% utilized
-                            })
-                return gpus
-
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            return []
+        except Exception:
+            return []
 
-        # Fallback: Try PyTorch
+        if result.returncode != 0:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 7:
+                continue
+            rows.append({
+                "index": int(parts[0]),
+                "name": parts[1],
+                "utilization": self._to_float(parts[2]),
+                "memory_total_mb": self._to_float(parts[3]),
+                "memory_free_mb": self._to_float(parts[4]),
+                "memory_used_mb": self._to_float(parts[5]),
+                "temperature": self._to_float(parts[6]),
+                "source": "nvidia-smi",
+            })
+        return rows
+
+    def _detect_gpu_metrics_via_torch(self) -> List[Dict[str, Any]]:
+        """Last-resort probe: torch.cuda (works when CUDA runtime is available)."""
         try:
             import torch
-            if torch.cuda.is_available():
-                gpus = []
-                for i in range(torch.cuda.device_count()):
-                    props = torch.cuda.get_device_properties(i)
-                    gpus.append({
-                        "id": i,
-                        "name": props.name,
-                        "memory_total": f"{props.total_memory // (1024**2)} MB",
-                        "memory_free": "N/A",
-                        "utilization": "N/A",
-                        "available": True
-                    })
-                return gpus
-        except ImportError:
-            pass
+        except Exception:
+            return []
 
-        # No GPUs detected
-        return []
+        if not torch.cuda.is_available():
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        try:
+            for index in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(index)
+                total_mb = float(props.total_memory) / (1024 ** 2)
+                free_mb = None
+                used_mb = None
+                try:
+                    free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+                    free_mb = float(free_bytes) / (1024 ** 2)
+                    used_mb = (float(total_bytes) - float(free_bytes)) / (1024 ** 2)
+                    total_mb = float(total_bytes) / (1024 ** 2)
+                except Exception:
+                    # mem_get_info may be unavailable on some CUDA/runtime combinations.
+                    pass
+
+                rows.append({
+                    "index": index,
+                    "name": str(props.name),
+                    "memory_total_mb": total_mb,
+                    "memory_free_mb": free_mb,
+                    "memory_used_mb": used_mb,
+                    "utilization": None,
+                    "temperature": None,
+                    "source": "torch",
+                })
+        except Exception:
+            return []
+
+        return rows
 
     def detect_local_models(self, custom_dirs: Optional[List[str]] = None) -> List[Dict[str, str]]:
         """
@@ -605,6 +778,27 @@ class SystemService:
             if match:
                 try:
                     return int(match.group(1))
+                except Exception:
+                    return None
+        return None
+
+    def _to_float(self, value: Any) -> Optional[float]:
+        """Convert loosely formatted numeric values (including 'N/A') to float."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            lowered = text.lower()
+            if lowered in {"n/a", "na", "[n/a]", "none", "null", "unknown"}:
+                return None
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            if match:
+                try:
+                    return float(match.group(0))
                 except Exception:
                     return None
         return None

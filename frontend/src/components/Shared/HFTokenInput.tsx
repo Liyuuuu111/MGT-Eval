@@ -1,6 +1,7 @@
 import React from 'react';
 import { Button, Form, Input, Space, Typography } from 'antd';
 import { useStore } from '../../store';
+import { FieldHelpText } from './FieldHelpText';
 
 interface HFTokenInputProps {
   disabled?: boolean;
@@ -14,7 +15,10 @@ export const HFTokenInput: React.FC<HFTokenInputProps> = ({ disabled = false }) 
   }));
 
   return (
-    <Form.Item label="HF Token (Optional)">
+    <Form.Item
+      label="HF Token (Optional)"
+      extra={<FieldHelpText path="hf_token" value={hfToken} />}
+    >
       <Input.Password
         value={hfToken}
         onChange={(e) => setHfToken(e.target.value)}

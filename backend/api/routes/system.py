@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 from pydantic import BaseModel
 import psutil
-import subprocess
 from backend.services.system_service import system_service
 from backend.services.process_manager import process_manager, JobStatus
 from backend.api.websocket.logs import manager as ws_manager
@@ -230,36 +229,9 @@ async def get_system_monitor():
         memory_used_gb = memory.used / (1024 ** 3)
         memory_total_gb = memory.total / (1024 ** 3)
 
-        # Get GPU stats using nvidia-smi
-        gpus = []
-        try:
-            result = subprocess.run(
-                [
-                    'nvidia-smi',
-                    '--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu',
-                    '--format=csv,noheader,nounits'
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    if not line:
-                        continue
-                    parts = [p.strip() for p in line.split(',')]
-                    if len(parts) >= 6:
-                        gpus.append(GPUMonitorInfo(
-                            index=int(parts[0]),
-                            name=parts[1],
-                            utilization=float(parts[2]),
-                            memory_used_mb=float(parts[3]),
-                            memory_total_mb=float(parts[4]),
-                            temperature=float(parts[5]),
-                        ))
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-            pass
+        # Get GPU stats using robust fallback in system_service.
+        gpu_stats = system_service.detect_gpu_monitor_stats()
+        gpus = [GPUMonitorInfo(**row) for row in gpu_stats]
 
         return SystemMonitorResponse(
             cpu_percent=cpu_percent,

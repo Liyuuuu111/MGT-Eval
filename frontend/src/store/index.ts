@@ -3,7 +3,17 @@
  */
 
 import { create } from 'zustand';
-import { LogEntry } from '../types';
+import { LogEntry, UILanguage } from '../types';
+
+const getDefaultUILanguage = (): UILanguage => {
+  if (typeof navigator !== 'undefined') {
+    const lang = (navigator.language || '').toLowerCase();
+    if (lang.startsWith('zh')) {
+      return 'zh';
+    }
+  }
+  return 'en';
+};
 
 interface AppState {
   // Build state
@@ -36,6 +46,7 @@ interface AppState {
 
   // Shared settings state
   hfToken: string;
+  uiLanguage: UILanguage;
 
   // Actions
   addBuildLog: (log: LogEntry) => void;
@@ -68,6 +79,7 @@ interface AppState {
 
   setHfToken: (token: string) => void;
   clearHfToken: () => void;
+  setUiLanguage: (lang: UILanguage) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -96,6 +108,7 @@ export const useStore = create<AppState>((set) => ({
   demoResult: null,
 
   hfToken: '',
+  uiLanguage: getDefaultUILanguage(),
 
   // Build actions
   addBuildLog: (log) => set((state) => ({
@@ -142,4 +155,5 @@ export const useStore = create<AppState>((set) => ({
 
   setHfToken: (token) => set({ hfToken: token }),
   clearHfToken: () => set({ hfToken: '' }),
+  setUiLanguage: (lang) => set({ uiLanguage: lang }),
 }));

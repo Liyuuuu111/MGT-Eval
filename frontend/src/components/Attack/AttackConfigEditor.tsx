@@ -7,6 +7,7 @@ import React from 'react';
 import { Collapse, Divider } from 'antd';
 import { DynamicFormFields } from '../Shared/DynamicFormFields';
 import { formatAttackLabel } from './attackLabels';
+import { UILanguage } from '../../types';
 
 const { Panel } = Collapse;
 
@@ -14,12 +15,14 @@ interface AttackConfigEditorProps {
   selectedAttacks: string[]; // attack keys (type or type-backend)
   allAttacks: any;
   attackMap: Map<string, any>; // Map from key to attack config
+  language?: UILanguage;
 }
 
 export const AttackConfigEditor: React.FC<AttackConfigEditorProps> = ({
   selectedAttacks,
   allAttacks,
-  attackMap
+  attackMap,
+  language = 'en',
 }) => {
   if (!selectedAttacks || selectedAttacks.length === 0) {
     return null;
@@ -45,7 +48,7 @@ export const AttackConfigEditor: React.FC<AttackConfigEditorProps> = ({
           const { type, backend, ...attackConfig } = attack;
 
           // Generate display name
-          const displayName = formatAttackLabel(type, backend);
+          const displayName = formatAttackLabel(type, backend, language);
 
           return (
             <Panel

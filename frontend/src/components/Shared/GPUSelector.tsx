@@ -17,8 +17,8 @@ interface GPU {
 }
 
 interface GPUSelectorProps {
-  value?: number[];
-  onChange?: (value: number[]) => void;
+  value?: number | number[];
+  onChange?: (value: number[] | number | undefined) => void;
   mode?: 'single' | 'multiple';
 }
 
@@ -36,6 +36,32 @@ export const GPUSelector: React.FC<GPUSelectorProps> = ({
     loadGPUs();
   }, []);
 
+  const normalizeToArray = (input: number | number[] | undefined): number[] => {
+    if (Array.isArray(input)) {
+      return input.filter((v) => Number.isFinite(v));
+    }
+    if (typeof input === 'number' && Number.isFinite(input)) {
+      return [input];
+    }
+    return [];
+  };
+
+  const handleChange = (next: number | number[]) => {
+    if (mode === 'multiple') {
+      onChange?.(normalizeToArray(next as number[]));
+      return;
+    }
+    if (Array.isArray(next)) {
+      onChange?.(next.length > 0 ? next[0] : undefined);
+      return;
+    }
+    onChange?.(next);
+  };
+
+  const normalizedMultipleValue = normalizeToArray(value);
+  const normalizedSingleValue =
+    typeof value === 'number' ? value : (Array.isArray(value) && value.length > 0 ? value[0] : undefined);
+
   const loadGPUs = async () => {
     try {
       setLoading(true);
@@ -44,8 +70,12 @@ export const GPUSelector: React.FC<GPUSelectorProps> = ({
       setRecommended(result.recommended_gpu);
 
       // Auto-select recommended GPU if nothing is selected
-      if (!value && result.recommended_gpu !== null) {
-        onChange?.([result.recommended_gpu]);
+      if ((value === undefined || value === null || (Array.isArray(value) && value.length === 0)) && result.recommended_gpu !== null) {
+        if (mode === 'multiple') {
+          onChange?.([result.recommended_gpu]);
+        } else {
+          onChange?.(result.recommended_gpu);
+        }
       }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to detect GPUs');
@@ -103,11 +133,10 @@ export const GPUSelector: React.FC<GPUSelectorProps> = ({
     <div>
       <Select
         mode={mode === 'multiple' ? 'multiple' : undefined}
-        value={value}
-        onChange={onChange}
+        value={mode === 'multiple' ? normalizedMultipleValue : normalizedSingleValue}
+        onChange={handleChange}
         placeholder="Select GPU(s)"
         style={{ width: '100%' }}
-        optionLabelProp="label"
       >
         {gpus.map((gpu) => renderGPUOption(gpu))}
       </Select>

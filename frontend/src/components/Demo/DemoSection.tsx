@@ -36,7 +36,9 @@ import { LogViewer } from '../Shared/LogViewer';
 import { ModelDownloadStatus } from '../Shared/ModelDownloadStatus';
 import { HFTokenInput } from '../Shared/HFTokenInput';
 import { HFMirrorSuggestion } from '../Shared/HFMirrorSuggestion';
+import { FieldHelpText } from '../Shared/FieldHelpText';
 import { useWebSocket } from '../../hooks/useWebSocket';
+import { useUILanguage } from '../../hooks/useUILanguage';
 import { useStore } from '../../store';
 import api from '../../services/api';
 import { DemoPredictResponse } from '../../types';
@@ -146,6 +148,7 @@ export const DemoSection: React.FC = () => {
   const [result, setResult] = useState<DemoPredictResponse | null>(null);
   const resultFetchedRef = useRef<string | null>(null);
   const [nowTs, setNowTs] = useState<number>(Date.now());
+  const { language } = useUILanguage();
 
   // Detect if user is likely in China (based on browser language)
   const isLikelyInChina = useMemo(() => {
@@ -164,7 +167,7 @@ export const DemoSection: React.FC = () => {
     hfToken,
   } = useStore();
 
-  useWebSocket({ jobId: demoJobId, section: 'demo' });
+  useWebSocket({ jobId: demoJobId, section: 'demo', isRunning: isDemoRunning });
 
   useEffect(() => {
     if (!isDemoRunning) {
@@ -374,7 +377,11 @@ export const DemoSection: React.FC = () => {
               boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
             }}
           >
-            <Form.Item label="Select Detector" required>
+            <Form.Item
+              label="Select Detector"
+              required
+              extra={<FieldHelpText path="detector" value={selectedDetector} />}
+            >
               <Select
                 value={selectedDetector}
                 onChange={handleDetectorChange}
@@ -397,6 +404,7 @@ export const DemoSection: React.FC = () => {
             <Form.Item
               name="text"
               label="Input Text"
+              extra={<FieldHelpText path="text" value={form.getFieldValue('text')} />}
               rules={[{ required: true, message: 'Text is required' }]}
             >
               <TextArea
@@ -406,7 +414,11 @@ export const DemoSection: React.FC = () => {
               />
             </Form.Item>
 
-            <Form.Item label="Quick Examples" style={{ marginBottom: 16 }}>
+            <Form.Item
+              label="Quick Examples"
+              style={{ marginBottom: 16 }}
+              extra={<FieldHelpText path="demo_examples" value={DEMO_EXAMPLES.length} />}
+            >
               <Space wrap size={[8, 8]}>
                 {DEMO_EXAMPLES.map((example) => (
                   <Button
@@ -426,16 +438,24 @@ export const DemoSection: React.FC = () => {
               System Resources
             </Divider>
 
-            <Form.Item name="gpu_ids" label="GPU Selection">
-              <GPUSelector mode="single" />
+            <Form.Item
+              name="gpu_ids"
+              label="GPU Selection"
+              extra={<FieldHelpText path="gpu_ids" value={form.getFieldValue('gpu_ids')} />}
+            >
+              <GPUSelector mode="multiple" />
             </Form.Item>
 
-            <Form.Item label="HF Download Source">
+            <Form.Item
+              label="HF Download Source"
+              extra={<FieldHelpText path="hf_endpoint" value={hfEndpoint} />}
+            >
               <Select value={hfEndpoint} onChange={setHfEndpoint}>
                 <Select.Option value="">Official (huggingface.co)</Select.Option>
                 <Select.Option value="https://hf-mirror.com">HF Mirror (hf-mirror.com)</Select.Option>
               </Select>
               <HFMirrorSuggestion
+                language={language}
                 show={isLikelyInChina && !hfEndpoint}
                 onUseMirror={() => setHfEndpoint('https://hf-mirror.com')}
               />

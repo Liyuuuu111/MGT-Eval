@@ -12,7 +12,9 @@ import { ModelDownloadStatus } from '../Shared/ModelDownloadStatus';
 import { ResultsDisplay } from '../Shared/ResultsDisplay';
 import { HFTokenInput } from '../Shared/HFTokenInput';
 import { HFMirrorSuggestion } from '../Shared/HFMirrorSuggestion';
+import { FieldHelpText } from '../Shared/FieldHelpText';
 import { useWebSocket } from '../../hooks/useWebSocket';
+import { useUILanguage } from '../../hooks/useUILanguage';
 import api from '../../services/api';
 import { DETECTOR_INFO, DetectorInfo, formatDetectorLabel, mergeDetectorInfo } from '../Detect/detectorInfo';
 
@@ -41,6 +43,7 @@ export const TrainSection: React.FC = () => {
   const [detectorInfoMap, setDetectorInfoMap] = useState<Record<string, DetectorInfo>>(DETECTOR_INFO);
   const [resultLoading, setResultLoading] = useState(false);
   const resultFetchedRef = React.useRef<string | null>(null);
+  const { language } = useUILanguage();
 
   // Detect if user is likely in China (based on browser language)
   const isLikelyInChina = useMemo(() => {
@@ -61,7 +64,7 @@ export const TrainSection: React.FC = () => {
     hfToken,
   } = useStore();
 
-  useWebSocket({ jobId: trainJobId, section: 'train' });
+  useWebSocket({ jobId: trainJobId, section: 'train', isRunning: isTrainRunning });
 
   // Dynamically split config keys for balanced layout
   const { leftKeys, rightKeys } = useMemo(() => {
@@ -89,6 +92,9 @@ export const TrainSection: React.FC = () => {
   // Load template when detector changes
   const handleDetectorChange = async (detector: string) => {
     setSelectedDetector(detector);
+    clearTrainLogs();
+    setTrainResult(null);
+    resultFetchedRef.current = null;
     try {
       const template = await api.getTrainTemplate(detector);
       setTemplateConfig(template);
@@ -187,7 +193,10 @@ export const TrainSection: React.FC = () => {
         {/* Left Column: Main Configuration + First Half of Parameters */}
         <Col span={12}>
           <Card title="Train Configuration">
-            <Form.Item label="Select Detector">
+            <Form.Item
+              label="Select Detector"
+              extra={<FieldHelpText path="detector" value={selectedDetector} />}
+            >
               <Select
                 value={selectedDetector}
                 onChange={handleDetectorChange}
@@ -234,16 +243,24 @@ export const TrainSection: React.FC = () => {
                 )}
                 <Divider orientation="left">System Resources</Divider>
 
-                <Form.Item name="gpu_ids" label="GPU Selection">
-                  <GPUSelector mode="single" />
+                <Form.Item
+                  name="gpu_ids"
+                  label="GPU Selection"
+                  extra={<FieldHelpText path="gpu_ids" value={form.getFieldValue('gpu_ids')} />}
+                >
+                  <GPUSelector mode="multiple" />
                 </Form.Item>
 
-                <Form.Item label="HF Download Source">
+                <Form.Item
+                  label="HF Download Source"
+                  extra={<FieldHelpText path="hf_endpoint" value={hfEndpoint} />}
+                >
                   <Select value={hfEndpoint} onChange={setHfEndpoint}>
                     <Select.Option value="">Official (huggingface.co)</Select.Option>
                     <Select.Option value="https://hf-mirror.com">HF Mirror (hf-mirror.com)</Select.Option>
                   </Select>
                   <HFMirrorSuggestion
+                    language={language}
                     show={isLikelyInChina && !hfEndpoint}
                     onUseMirror={() => setHfEndpoint('https://hf-mirror.com')}
                   />

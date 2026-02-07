@@ -1,13 +1,17 @@
 import React from 'react';
 import { Button, Space, Tag, Typography } from 'antd';
 import { GlobalOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { UILanguage } from '../../types';
+import { getCoreText } from '../../i18n/coreText';
 
 interface HFMirrorSuggestionProps {
+  language: UILanguage;
   show: boolean;
   onUseMirror: () => void;
 }
 
 export const HFMirrorSuggestion: React.FC<HFMirrorSuggestionProps> = ({
+  language,
   show,
   onUseMirror,
 }) => {
@@ -37,10 +41,10 @@ export const HFMirrorSuggestion: React.FC<HFMirrorSuggestionProps> = ({
         <Space size={8}>
           <GlobalOutlined style={{ color: '#1677ff' }} />
           <Typography.Text strong style={{ color: '#1d39c4' }}>
-            建议使用 HF Mirror 源
+            {getCoreText(language, 'hfMirrorTitle')}
           </Typography.Text>
           <Tag color="blue" style={{ margin: 0 }}>
-            CN Friendly
+            {getCoreText(language, 'hfMirrorTag')}
           </Tag>
         </Space>
         <Button
@@ -49,11 +53,11 @@ export const HFMirrorSuggestion: React.FC<HFMirrorSuggestionProps> = ({
           icon={<ThunderboltOutlined />}
           onClick={onUseMirror}
         >
-          一键切换
+          {getCoreText(language, 'hfMirrorAction')}
         </Button>
       </div>
       <Typography.Text style={{ fontSize: 12, color: '#4b5563' }}>
-        检测到您可能位于中国地区，切换到 `https://hf-mirror.com` 通常可显著提升模型下载成功率与速度。
+        {getCoreText(language, 'hfMirrorBody')}
       </Typography.Text>
     </div>
   );

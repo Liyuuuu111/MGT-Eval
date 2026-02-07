@@ -8,6 +8,22 @@ export interface LogEntry {
   timestamp: string;
 }
 
+export type UILanguage = 'en' | 'zh';
+
+export interface LocalizedText {
+  en: string;
+  zh: string;
+}
+
+export interface AttackMethodInfo {
+  key: string;
+  displayName: LocalizedText;
+  whatItDoes: LocalizedText;
+  whenToUse: LocalizedText;
+  riskTradeoff: LocalizedText;
+  computeCostHint: LocalizedText;
+}
+
 export interface HFDownloadItem {
   path: string;
   size_bytes: number;
@@ -57,7 +73,7 @@ export interface DetectorMetadata {
   key: string;
   name?: string;
   type?: string;
-  description?: string;
+  description?: string | LocalizedText;
   paper?: string;
   authors?: string;
   link?: string;
@@ -69,6 +85,12 @@ export interface DemoPredictResponse {
   ai_probability: number;
   threshold: number;
   artifact_paths: Record<string, string | null>;
+}
+
+export interface FieldHelpEntry {
+  purpose: string;
+  higher: string;
+  lower: string;
 }
 
 export interface Job {
