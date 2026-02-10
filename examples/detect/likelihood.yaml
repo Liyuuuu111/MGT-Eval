@@ -11,6 +11,7 @@ out: 'runs/likelihood'
 save_curves: true
 no_progress: false
 k_runs: 1
+attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
 detector_kwargs:
   # score_model: EleutherAI/gpt-neo-125m
   # fp16: true

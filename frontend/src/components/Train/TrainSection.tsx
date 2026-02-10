@@ -98,8 +98,16 @@ export const TrainSection: React.FC = () => {
   // Dynamically split config keys for balanced layout
   const { leftKeys, rightKeys } = useMemo(() => {
     const mainKeys = ['gpu_ids'];
-    return splitConfigKeys(templateConfig, mainKeys);
-  }, [templateConfig]);
+    const result = splitConfigKeys(templateConfig, mainKeys);
+    // model1 is unused/irrelevant in the finetuned training template
+    if (selectedDetector === 'finetuned') {
+      return {
+        leftKeys: result.leftKeys.filter((k) => k !== 'model1'),
+        rightKeys: result.rightKeys.filter((k) => k !== 'model1'),
+      };
+    }
+    return result;
+  }, [templateConfig, selectedDetector]);
 
   // Load detectors
   useEffect(() => {
@@ -238,22 +246,20 @@ export const TrainSection: React.FC = () => {
                       <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {formatDetectorLabel(d, detectorInfoMap)}
                       </span>
-                      {hasDetectorVenue(d, detectorInfoMap) && (
-                        <Tag
-                          color={getDetectorVenueTagColor(d, detectorInfoMap)}
-                          style={{
-                            margin: 0,
-                            borderRadius: 999,
-                            fontSize: 12,
-                            lineHeight: '18px',
-                            paddingInline: 9,
-                            fontWeight: 600,
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {formatDetectorVenue(d, detectorInfoMap)}
-                        </Tag>
-                      )}
+                      <Tag
+                        color={hasDetectorVenue(d, detectorInfoMap) ? getDetectorVenueTagColor(d, detectorInfoMap) : 'default'}
+                        style={{
+                          margin: 0,
+                          borderRadius: 999,
+                          fontSize: 12,
+                          lineHeight: '18px',
+                          paddingInline: 9,
+                          fontWeight: 600,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {hasDetectorVenue(d, detectorInfoMap) ? formatDetectorVenue(d, detectorInfoMap) : 'Baseline'}
+                      </Tag>
                     </div>
                   </Select.Option>
                 ))}

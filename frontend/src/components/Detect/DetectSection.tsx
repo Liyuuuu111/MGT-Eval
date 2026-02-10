@@ -332,22 +332,20 @@ export const DetectSection: React.FC = () => {
                       <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {formatDetectorLabel(d, detectorInfoMap)}
                       </span>
-                      {hasDetectorVenue(d, detectorInfoMap) && (
-                        <Tag
-                          color={getDetectorVenueTagColor(d, detectorInfoMap)}
-                          style={{
-                            margin: 0,
-                            borderRadius: 999,
-                            fontSize: 12,
-                            lineHeight: '18px',
-                            paddingInline: 9,
-                            fontWeight: 600,
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {formatDetectorVenue(d, detectorInfoMap)}
-                        </Tag>
-                      )}
+                      <Tag
+                        color={hasDetectorVenue(d, detectorInfoMap) ? getDetectorVenueTagColor(d, detectorInfoMap) : 'default'}
+                        style={{
+                          margin: 0,
+                          borderRadius: 999,
+                          fontSize: 12,
+                          lineHeight: '18px',
+                          paddingInline: 9,
+                          fontWeight: 600,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {hasDetectorVenue(d, detectorInfoMap) ? formatDetectorVenue(d, detectorInfoMap) : 'Baseline'}
+                      </Tag>
                     </div>
                   </Select.Option>
                 ))}

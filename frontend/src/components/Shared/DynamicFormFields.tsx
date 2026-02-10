@@ -13,15 +13,34 @@ import { getDetectorModelRole, isModelFieldKey } from '../../config/detectorMode
 const { Panel } = Collapse;
 
 const FINETUNED_BACKBONE_PRESETS: string[] = [
+  // RoBERTa family
   'roberta-base',
   'roberta-large',
+  // BERT family
   'bert-base-uncased',
   'bert-large-uncased',
   'distilbert-base-uncased',
+  // DeBERTa family (top classifiers)
+  'microsoft/deberta-v3-small',
   'microsoft/deberta-v3-base',
   'microsoft/deberta-v3-large',
+  // ALBERT
+  'albert-base-v2',
+  'albert-large-v2',
+  // XLM-RoBERTa (multilingual)
+  'xlm-roberta-base',
+  'xlm-roberta-large',
+  // ELECTRA discriminator
+  'google/electra-base-discriminator',
+  'google/electra-large-discriminator',
+  // ModernBERT (newer encoder)
+  'answerdotai/ModernBERT-base',
+  'answerdotai/ModernBERT-large',
+  // GPT-2 family (decoder)
   'gpt2',
   'gpt2-medium',
+  'gpt2-large',
+  'gpt2-xl',
 ];
 
 interface DynamicFormFieldsProps {
@@ -340,7 +359,9 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
           normalizedDetectorValue === 'finetuned'
           || normalizedDetectorValue === 'hfcls'
           || normalizedDetectorValue.startsWith('hf:');
-        const finetunedPresetOptions = isFinetunedDetector
+        // Classifier Checkpoint fields hold trained checkpoints, not HF backbone presets
+        const isClassifierCheckpoint = modelRole?.label === 'Classifier Checkpoint';
+        const finetunedPresetOptions = (isFinetunedDetector && !isClassifierCheckpoint)
           ? FINETUNED_BACKBONE_PRESETS
           : undefined;
         return (

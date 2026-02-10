@@ -811,28 +811,26 @@ export const DemoSection: React.FC = () => {
                   <Select.Option
                     key={d}
                     value={d}
-                    label={`${formatDetectorLabel(d, detectorInfoMap)}${hasDetectorVenue(d, detectorInfoMap) ? ` ${formatDetectorVenue(d, detectorInfoMap)}` : ''}`}
+                    label={`${formatDetectorLabel(d, detectorInfoMap)}${hasDetectorVenue(d, detectorInfoMap) ? ` ${formatDetectorVenue(d, detectorInfoMap)}` : ' Baseline'}`}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                       <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {formatDetectorLabel(d, detectorInfoMap)}
                       </span>
-                      {hasDetectorVenue(d, detectorInfoMap) && (
-                        <Tag
-                          color={getDetectorVenueTagColor(d, detectorInfoMap)}
-                          style={{
-                            margin: 0,
-                            borderRadius: 999,
-                            fontSize: 12,
-                            lineHeight: '18px',
-                            paddingInline: 9,
-                            fontWeight: 600,
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {formatDetectorVenue(d, detectorInfoMap)}
-                        </Tag>
-                      )}
+                      <Tag
+                        color={hasDetectorVenue(d, detectorInfoMap) ? getDetectorVenueTagColor(d, detectorInfoMap) : 'default'}
+                        style={{
+                          margin: 0,
+                          borderRadius: 999,
+                          fontSize: 12,
+                          lineHeight: '18px',
+                          paddingInline: 9,
+                          fontWeight: 600,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {hasDetectorVenue(d, detectorInfoMap) ? formatDetectorVenue(d, detectorInfoMap) : 'Baseline'}
+                      </Tag>
                     </div>
                   </Select.Option>
                 ))}

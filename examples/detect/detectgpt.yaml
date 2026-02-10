@@ -11,6 +11,7 @@ device: 'cuda:0'
 bf16: true
 out: 'runs/detectgpt'
 save_curves: true
+attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
 no_progress: false
 k_runs: 1
 detector_kwargs:

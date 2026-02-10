@@ -15,3 +15,4 @@ out: 'runs/hfcls'
 save_curves: true
 no_progress: false
 k_runs: 1
+attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl

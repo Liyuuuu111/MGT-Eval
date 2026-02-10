@@ -12,6 +12,7 @@ bf16: true
 out: 'runs/dnadetectllm'
 save_curves: true
 no_progress: false
+attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
 k_runs: 1
 detector_kwargs:
   # observer_model: EleutherAI/gpt-neo-125m
