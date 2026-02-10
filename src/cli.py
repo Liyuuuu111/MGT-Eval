@@ -512,6 +512,12 @@ def _add_dataset_builder_args(ap: argparse.ArgumentParser, *, yaml_cmd: Optional
     ap.add_argument("--machine_label", type=int, default=1)
     ap.add_argument("--sample_k", type=int, default=None)
 
+    # optional dataset split (build output post-processing)
+    ap.add_argument("--enable_dataset_split", type=int, default=0, help="1: split out file to train/dev/test")
+    ap.add_argument("--split_train_ratio", type=int, default=8, help="train split ratio in [0,10]")
+    ap.add_argument("--split_dev_ratio", type=int, default=1, help="dev split ratio in [0,10]")
+    ap.add_argument("--split_test_ratio", type=int, default=1, help="test split ratio in [0,10]")
+
 def _run_dataset_builder(args, *, force_attack_only: Optional[bool] = None) -> None:
     # lazy import to keep core CLI fast
     from dataset_builder import cli as _db_cli
@@ -607,6 +613,10 @@ def _run_dataset_builder(args, *, force_attack_only: Optional[bool] = None) -> N
         machine_label=int(args.machine_label),
         sample_k=sample_k,
         gen_batch_size=int(getattr(args, "gen_batch_size", 1) or 1),
+        enable_dataset_split=bool(int(getattr(args, "enable_dataset_split", 0) or 0)),
+        split_train_ratio=int(getattr(args, "split_train_ratio", 8) or 0),
+        split_dev_ratio=int(getattr(args, "split_dev_ratio", 1) or 0),
+        split_test_ratio=int(getattr(args, "split_test_ratio", 1) or 0),
     )
 
     backend = None

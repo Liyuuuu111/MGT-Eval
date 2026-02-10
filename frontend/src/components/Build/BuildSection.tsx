@@ -15,6 +15,7 @@ import { FieldHelpText } from '../Shared/FieldHelpText';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useUILanguage } from '../../hooks/useUILanguage';
 import api from '../../services/api';
+import { START_SECTION_EVENT, StartSectionEventDetail } from '../../constants/jobControls';
 
 // Helper function to split config keys for balanced layout
 const splitConfigKeys = (config: any, mainKeys: string[]): { leftKeys: string[], rightKeys: string[] } => {
@@ -37,6 +38,7 @@ export const BuildSection: React.FC = () => {
   const [templateConfig, setTemplateConfig] = useState<any>(null);
   const [hfEndpoint, setHfEndpoint] = useState<string>('');
   const { language } = useUILanguage();
+  const watchedGpuIds = Form.useWatch('gpu_ids', form);
 
   const isLikelyInChina = useMemo(() => {
     const nav = window.navigator;
@@ -76,6 +78,24 @@ export const BuildSection: React.FC = () => {
 
   useWebSocket({ jobId: buildJobId, section: 'build', isRunning: isBuildRunning });
 
+  useEffect(() => {
+    const handleStartRequest = (event: Event) => {
+      const detail = (event as CustomEvent<StartSectionEventDetail>).detail;
+      if (detail?.section !== 'build') {
+        return;
+      }
+      if (isBuildRunning || loading) {
+        return;
+      }
+      form.submit();
+    };
+
+    window.addEventListener(START_SECTION_EVENT, handleStartRequest as EventListener);
+    return () => {
+      window.removeEventListener(START_SECTION_EVENT, handleStartRequest as EventListener);
+    };
+  }, [form, isBuildRunning, loading]);
+
   // Dynamically split config keys for balanced layout
   const { leftKeys, rightKeys } = useMemo(() => {
     const mainKeys = ['data', 'out', 'gpu_ids'];
@@ -95,6 +115,27 @@ export const BuildSection: React.FC = () => {
     };
     loadTemplate();
   }, [form]);
+
+  useEffect(() => {
+    if (!templateConfig || !Object.prototype.hasOwnProperty.call(templateConfig, 'vllm_tensor_parallel_size')) {
+      return;
+    }
+    if (form.isFieldTouched('vllm_tensor_parallel_size')) {
+      return;
+    }
+
+    const gpuCount = Array.isArray(watchedGpuIds)
+      ? watchedGpuIds.filter((id) => Number.isFinite(id)).length
+      : (typeof watchedGpuIds === 'number' && Number.isFinite(watchedGpuIds) ? 1 : 0);
+    if (gpuCount <= 0) {
+      return;
+    }
+
+    const current = Number(form.getFieldValue('vllm_tensor_parallel_size'));
+    if (!Number.isFinite(current) || current !== gpuCount) {
+      form.setFieldValue('vllm_tensor_parallel_size', gpuCount);
+    }
+  }, [templateConfig, watchedGpuIds, form]);
 
   const handleSubmit = async (values: any) => {
     setLoading(true);

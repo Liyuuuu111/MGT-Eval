@@ -25,4 +25,4 @@ detector_kwargs:
   max_len: 512
   device: 'cuda:0'
   use_bfloat16: true
-  mask_use_bfloat16: true    # T5 单独控制
+  mask_use_bfloat16: true    # T5

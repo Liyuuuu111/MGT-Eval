@@ -12,6 +12,18 @@ import { getDetectorModelRole, isModelFieldKey } from '../../config/detectorMode
 
 const { Panel } = Collapse;
 
+const FINETUNED_BACKBONE_PRESETS: string[] = [
+  'roberta-base',
+  'roberta-large',
+  'bert-base-uncased',
+  'bert-large-uncased',
+  'distilbert-base-uncased',
+  'microsoft/deberta-v3-base',
+  'microsoft/deberta-v3-large',
+  'gpt2',
+  'gpt2-medium',
+];
+
 interface DynamicFormFieldsProps {
   data: any;
   prefix?: string[];
@@ -35,6 +47,42 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
 
   const effectiveRootContext: Record<string, unknown> =
     rootContext ?? (typeof data === 'object' && data !== null ? data : {});
+  const detectorHint = typeof effectiveRootContext.detector === 'string' ? effectiveRootContext.detector : '';
+  const detectorKwargs = (
+    typeof effectiveRootContext.detector_kwargs === 'object' && effectiveRootContext.detector_kwargs !== null
+      ? (effectiveRootContext.detector_kwargs as Record<string, unknown>)
+      : {}
+  );
+
+  const collectCalibratorModelHints = (): string[] => {
+    const hints = new Set<string>();
+    const add = (v: unknown) => {
+      if (typeof v !== 'string') return;
+      const text = v.trim();
+      if (!text) return;
+      hints.add(text);
+    };
+    const keys = [
+      'model',
+      'model1',
+      'model2',
+      'model3',
+      'observer_model',
+      'performer_model',
+      'checkpoint',
+      'checkpoint_dir',
+      'hf_model',
+      'api_model',
+      'ppl_model',
+      'bertscore_model',
+    ];
+    keys.forEach((k) => {
+      add(effectiveRootContext[k]);
+      add(detectorKwargs[k]);
+    });
+    return Array.from(hints);
+  };
+  const calibratorModelHints = collectCalibratorModelHints();
 
   const binaryFieldKeys = new Set([
     'only_human_prompts',
@@ -47,7 +95,14 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
     'metric_readability',
     'metric_bertscore',
     'only_attack_machine',
+    'bf16',
+    'fp16',
+    'use_bfloat16',
+    'mask_use_bfloat16',
   ]);
+  // Keys inside detector_kwargs that duplicate top-level bf16/fp16 flags
+  const precisionDupKeys = new Set(['use_bfloat16', 'mask_use_bfloat16']);
+  const excludeKeySet = new Set(excludeKeys.map((item) => item.toLowerCase()));
 
   const getNumberInputSpec = (fieldPath: string, key: string, value: number): {
     step: number;
@@ -84,6 +139,7 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
     const keyLower = key.toLowerCase();
     const isBinaryField = binaryFieldKeys.has(keyLower);
     const detectorValue = typeof effectiveRootContext.detector === 'string' ? effectiveRootContext.detector : null;
+    const normalizedDetectorValue = String(detectorValue || '').toLowerCase();
     const modelRole = isModelFieldKey(keyLower) ? getDetectorModelRole(detectorValue, keyLower) : undefined;
     const resolvedLabel = modelRole ? `${formatLabel(key)} (${modelRole.label})` : formatLabel(key);
     const fieldHelp = (
@@ -100,8 +156,16 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
     }
 
     // Skip excluded keys
-    if (excludeKeys.includes(key)) {
+    if (excludeKeys.includes(key) || excludeKeySet.has(keyLower)) {
       return null;
+    }
+
+    // Skip detector_kwargs precision keys that duplicate top-level bf16/fp16
+    if (precisionDupKeys.has(keyLower) && fieldName.length > 1) {
+      const hasToplevelBf16 = 'bf16' in data || 'fp16' in data;
+      if (hasToplevelBf16) {
+        return null;
+      }
     }
 
     // Handle null values
@@ -221,13 +285,24 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
             label={resolvedLabel}
             extra={fieldHelp}
           >
-            <CalibratorSelector allowManual />
+            <CalibratorSelector
+              allowManual
+              detectorKey={detectorHint || undefined}
+              modelHints={calibratorModelHints}
+            />
           </Form.Item>
         );
       }
 
       // Model fields use ModelSelector
       if (modelFields.includes(key)) {
+        const isFinetunedDetector =
+          normalizedDetectorValue === 'finetuned'
+          || normalizedDetectorValue === 'hfcls'
+          || normalizedDetectorValue.startsWith('hf:');
+        const finetunedPresetOptions = isFinetunedDetector
+          ? FINETUNED_BACKBONE_PRESETS
+          : undefined;
         return (
           <Form.Item
             key={fieldPath}
@@ -235,7 +310,11 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
             label={resolvedLabel}
             extra={fieldHelp}
           >
-            <ModelSelector allowManual />
+            <ModelSelector
+              allowManual
+              presetOptions={finetunedPresetOptions}
+              presetLabel="Finetuned Backbones"
+            />
           </Form.Item>
         );
       }
@@ -272,9 +351,8 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
             <Select>
               <Select.Option value="auto">auto</Select.Option>
               <Select.Option value="float32">float32</Select.Option>
-              <Select.Option value="float16">float16</Select.Option>
-              <Select.Option value="bfloat16">bfloat16</Select.Option>
-              <Select.Option value="bf16">bf16</Select.Option>
+              <Select.Option value="float16">float16 (FP16)</Select.Option>
+              <Select.Option value="bfloat16">bfloat16 (BF16)</Select.Option>
             </Select>
           </Form.Item>
         );

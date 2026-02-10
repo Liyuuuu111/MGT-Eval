@@ -187,6 +187,36 @@ class TextQualityEvaluator:
             return torch.float32
         return None  # auto
 
+    def _resolve_device(self, raw_device: Optional[str]) -> str:
+        torch = self._lazy_import_torch()
+        dv = str(raw_device or "").strip().lower()
+        if dv in ("", "auto"):
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+        if dv == "cuda":
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+        if dv.startswith("cuda"):
+            if not torch.cuda.is_available():
+                return "cpu"
+            if ":" not in dv:
+                return "cuda:0"
+            try:
+                idx = int(dv.split(":", 1)[1])
+            except Exception:
+                idx = 0
+            n_cuda = int(torch.cuda.device_count() or 0)
+            if n_cuda <= 0:
+                return "cpu"
+            if idx < 0 or idx >= n_cuda:
+                idx = 0
+            return f"cuda:{idx}"
+        if dv == "cpu":
+            return "cpu"
+        try:
+            _ = torch.device(dv)
+            return dv
+        except Exception:
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+
     # ---------- PPL ----------
     def _ensure_ppl_model(self):
         if not self.cfg.enable_ppl:
@@ -209,7 +239,9 @@ class TextQualityEvaluator:
             self.cfg.ppl_model,
             torch_dtype=dtype,
         )
-        lm.to(self.cfg.ppl_device)
+        ppl_device = self._resolve_device(self.cfg.ppl_device)
+        self.cfg.ppl_device = ppl_device
+        lm.to(ppl_device)
         lm.eval()
 
         # some models need pad_token_id set
@@ -318,7 +350,9 @@ class TextQualityEvaluator:
 
         tok = AutoTokenizer.from_pretrained(self.cfg.bertscore_model, use_fast=True)
         model = AutoModel.from_pretrained(self.cfg.bertscore_model)
-        model.to(self.cfg.bertscore_device)
+        bertscore_device = self._resolve_device(self.cfg.bertscore_device)
+        self.cfg.bertscore_device = bertscore_device
+        model.to(bertscore_device)
         model.eval()
 
         self._bs_tok = tok

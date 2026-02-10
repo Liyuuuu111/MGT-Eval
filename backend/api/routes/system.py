@@ -49,6 +49,30 @@ class CalibratorListResponse(BaseModel):
     calibrators: List[CalibratorInfo]
 
 
+class CalibratorThresholdPreset(BaseModel):
+    key: str
+    label: str
+    threshold: float
+    source: str
+    tpr: Optional[float] = None
+    fpr: Optional[float] = None
+    target_fpr: Optional[float] = None
+    acc: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    f1: Optional[float] = None
+    tp: Optional[int] = None
+    tn: Optional[int] = None
+    fp: Optional[int] = None
+    fn: Optional[int] = None
+
+
+class CalibratorThresholdsResponse(BaseModel):
+    path: str
+    presets: List[CalibratorThresholdPreset]
+    default_threshold: Optional[float] = None
+
+
 class CancelJobResponse(BaseModel):
     status: str
 
@@ -162,6 +186,19 @@ async def get_calibrators(custom_dirs: Optional[str] = None):
 
         calibrators = system_service.detect_calibrators(dirs)
         return CalibratorListResponse(calibrators=calibrators)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/calibrator-thresholds", response_model=CalibratorThresholdsResponse)
+async def get_calibrator_thresholds(path: str):
+    """Get threshold presets parsed from a calibrator file or directory."""
+    try:
+        return system_service.get_calibrator_thresholds(path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

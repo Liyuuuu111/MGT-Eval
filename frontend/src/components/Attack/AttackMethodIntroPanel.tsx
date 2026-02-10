@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Collapse, Typography, Space, Tag } from 'antd';
+import { Card, Collapse, Typography, Tag } from 'antd';
 import { UILanguage } from '../../types';
 import { getCoreText } from '../../i18n/coreText';
 import { formatAttackLabel, getAttackMethodInfo } from './attackLabels';

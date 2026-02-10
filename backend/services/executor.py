@@ -71,6 +71,13 @@ class CommandExecutor:
 
             # Set up environment with GPU selection
             env = os.environ.copy()
+            # PyTorch renamed this env var; keep compatibility while avoiding runtime warning.
+            legacy_alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF")
+            if legacy_alloc_conf and not env.get("PYTORCH_ALLOC_CONF"):
+                env["PYTORCH_ALLOC_CONF"] = legacy_alloc_conf
+            if "PYTORCH_CUDA_ALLOC_CONF" in env:
+                env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+
             hf_endpoint = config.get("hf_endpoint") if isinstance(config, dict) else None
             if hf_endpoint is not None:
                 endpoint = str(hf_endpoint).strip()
@@ -92,10 +99,30 @@ class CommandExecutor:
 
             if "gpu_ids" in config and config["gpu_ids"] is not None:
                 gpu_ids = config["gpu_ids"]
+                gpu_count = 1
                 if isinstance(gpu_ids, list):
+                    gpu_count = len(gpu_ids)
                     env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
                 else:
+                    gpu_count = 1
                     env["CUDA_VISIBLE_DEVICES"] = str(gpu_ids)
+                # Keep CUDA device ordering stable on heterogeneous machines.
+                env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+                # Improve NCCL deadlock diagnostics/recovery.
+                env.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+                use_vllm = False
+                if isinstance(config, dict):
+                    raw_use_vllm = config.get("use_vllm", 0)
+                    if isinstance(raw_use_vllm, bool):
+                        use_vllm = raw_use_vllm
+                    elif isinstance(raw_use_vllm, (int, float)):
+                        use_vllm = int(raw_use_vllm) != 0
+                    elif isinstance(raw_use_vllm, str):
+                        use_vllm = raw_use_vllm.strip().lower() in {"1", "true", "yes", "on"}
+                if use_vllm and gpu_count > 1:
+                    # Avoid common topology-dependent P2P stalls when tensor parallel is enabled.
+                    env.setdefault("NCCL_P2P_DISABLE", "1")
+                    env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
                 await log_callback(job_id, f"Using GPUs: {env['CUDA_VISIBLE_DEVICES']}", "info")
 
             # Execute command

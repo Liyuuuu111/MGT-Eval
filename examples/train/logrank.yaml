@@ -16,6 +16,6 @@ out_dir: calibration_results
 no_progress: false
 model1: EleutherAI/gpt-neo-125m
 detector_kwargs:
-  # score_model: EleutherAI/gpt-neo-125m
+  score_model: EleutherAI/gpt-neo-125m
   use_analytic: true
   max_length: 512

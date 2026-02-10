@@ -91,6 +91,12 @@ class BuildConfig:
     save_attack_outputs: bool = True          # default: write attack outputs (e.g., <out>.attacks/attacks.jsonl)
     save_attack_folder: bool = True           # default: write all attacks to <out>.attacks/attacks.jsonl
 
+    # optional dataset split (when enabled, only split files are kept; unsplit out_jsonl is removed)
+    enable_dataset_split: bool = False
+    split_train_ratio: int = 8
+    split_dev_ratio: int = 1
+    split_test_ratio: int = 1
+
     # generation batching (only for build, not attack-only)
     gen_batch_size: int = 1
 

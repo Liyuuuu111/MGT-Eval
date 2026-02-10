@@ -14,8 +14,8 @@ no_progress: false
 k_runs: 1
 attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
 detector_kwargs:
-  # observer: EleutherAI/gpt-neo-125m
-  # performer: EleutherAI/gpt-neo-125m
+  observer: EleutherAI/gpt-neo-125m
+  performer: EleutherAI/gpt-neo-125m
   mode: low-fpr
   max_len: 512
   prob_slope: 0.0

@@ -79,6 +79,30 @@ export interface DetectorMetadata {
   link?: string;
 }
 
+export interface CalibratorThresholdPreset {
+  key: string;
+  label: string;
+  threshold: number;
+  source: string;
+  tpr?: number;
+  fpr?: number;
+  target_fpr?: number;
+  acc?: number;
+  precision?: number;
+  recall?: number;
+  f1?: number;
+  tp?: number;
+  tn?: number;
+  fp?: number;
+  fn?: number;
+}
+
+export interface CalibratorThresholdsResponse {
+  path: string;
+  presets: CalibratorThresholdPreset[];
+  default_threshold?: number | null;
+}
+
 export interface DemoPredictResponse {
   label: 'human' | 'machine';
   confidence: number;

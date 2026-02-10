@@ -45,16 +45,16 @@ const GENERIC_PATH_HELP = (label: string, language: UILanguage): FieldHelpEntry 
 const GENERIC_NUMBER_HELP = (key: string, language: UILanguage): FieldHelpEntry => ({
   purpose:
     language === 'zh'
-      ? `${humanizeKey(key)} 的数值控制项。`
-      : `Numeric control for ${humanizeKey(key)}.`,
+      ? `${humanizeKey(key)} 的数值调节项，用来控制该步骤的规模、强度或判定边界。`
+      : `Numeric control for ${humanizeKey(key)}, used to tune scale, intensity, or decision boundaries.`,
   higher:
     language === 'zh'
-      ? '值更高通常会增强效果，同时增加计算耗时或内存使用。'
-      : 'Higher values usually increase effect strength, runtime, or memory use.',
+      ? `当该值升高时，${humanizeKey(key)} 在流程中的影响通常会更强；请同步观察精度、误差分布和资源占用变化。`
+      : `When this value increases, ${humanizeKey(key)} usually has stronger influence in the pipeline; monitor quality metrics, error profile, and resource usage together.`,
   lower:
     language === 'zh'
-      ? '值更低通常会减弱效果，同时降低计算耗时或内存使用。'
-      : 'Lower values usually reduce effect strength, runtime, or memory use.',
+      ? `当该值降低时，${humanizeKey(key)} 的影响通常更保守；流程更轻量，但可能损失部分区分能力或覆盖范围。`
+      : `When this value decreases, ${humanizeKey(key)} tends to be more conservative; the run is lighter but may lose some discrimination power or coverage.`,
 });
 
 const GENERIC_ENUM_HELP = (key: string, language: UILanguage): FieldHelpEntry => ({
@@ -110,6 +110,31 @@ const humanizeKey = (key: string): string => {
     .trim();
 };
 
+const localizeRoleLabel = (label: string, language: UILanguage): string => {
+  if (language !== 'zh') {
+    return label;
+  }
+  return String(label || '')
+    .replace(/Observer/gi, '观测')
+    .replace(/Performer/gi, '生成')
+    .replace(/Scoring/gi, '评分')
+    .replace(/Score/gi, '评分')
+    .replace(/Classifier/gi, '分类器')
+    .replace(/Checkpoint/gi, '检查点')
+    .replace(/Reference/gi, '参考')
+    .replace(/Target/gi, '目标')
+    .replace(/Surrogate/gi, '代理')
+    .replace(/Embedding/gi, '嵌入')
+    .replace(/Backbone/gi, '骨干')
+    .replace(/Augmentation/gi, '增强')
+    .replace(/Mask/gi, '掩码')
+    .replace(/Sampling/gi, '采样')
+    .replace(/Rewrite/gi, '改写')
+    .replace(/Model/gi, '模型')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 const isLikelyPathField = (path: string, key: string): boolean => {
   const joined = `${path}.${key}`.toLowerCase();
   return /(path|file|dir|folder|dataset|output|input|cache|manifest|calibrator|artifact)/.test(joined);
@@ -155,6 +180,54 @@ const buildNumericHeuristic = (key: string, language: UILanguage): FieldHelpEntr
         language === 'zh'
           ? '更低通常更保守，文本更自然，但攻击或覆盖效果减弱。'
           : 'Lower values are usually more conservative and natural, but weaker for attack strength/coverage.',
+    };
+  }
+  if (/(fpr|false_positive)/.test(normalized)) {
+    return {
+      purpose:
+        language === 'zh'
+          ? '控制可接受误报率（False Positive Rate）目标或约束。'
+          : 'Controls the target/constraint for acceptable false positive rate.',
+      higher:
+        language === 'zh'
+          ? '更高的 FPR 目标通常更激进，可能提升召回/检出，但误报也会增加。'
+          : 'Higher FPR targets are more aggressive and can increase recall/detection, but also raise false alarms.',
+      lower:
+        language === 'zh'
+          ? '更低的 FPR 目标通常更保守，可减少误报，但可能漏检更多样本。'
+          : 'Lower FPR targets are more conservative and reduce false alarms, but can miss more positives.',
+    };
+  }
+  if (/(tpr|recall_target)/.test(normalized)) {
+    return {
+      purpose:
+        language === 'zh'
+          ? '控制期望召回率（True Positive Rate）目标。'
+          : 'Controls the target true positive rate (recall).',
+      higher:
+        language === 'zh'
+          ? '更高的 TPR 目标会推动更多正类被检出，但通常需要接受更高误报。'
+          : 'Higher TPR targets push for more positive detections, often requiring acceptance of higher false positives.',
+      lower:
+        language === 'zh'
+          ? '更低的 TPR 目标更容易满足并减少激进判定，但可能降低检测覆盖。'
+          : 'Lower TPR targets are easier to satisfy and less aggressive, but may reduce detection coverage.',
+    };
+  }
+  if (/(asr|attack_success)/.test(normalized)) {
+    return {
+      purpose:
+        language === 'zh'
+          ? '攻击成功率相关阈值/目标参数。'
+          : 'Threshold/target parameter related to attack success rate.',
+      higher:
+        language === 'zh'
+          ? '更高设置通常要求更强攻击效果或更高成功判定，结果会更严格。'
+          : 'Higher settings usually demand stronger attack effect or stricter success criteria.',
+      lower:
+        language === 'zh'
+          ? '更低设置会放宽成功判定，便于达到目标，但区分度可能下降。'
+          : 'Lower settings relax success criteria and are easier to satisfy, but may reduce discriminative value.',
     };
   }
   if (/(^n_|_num$|_count$|layers?$|gcn_layers|max_nodes_num)/.test(normalized)) {
@@ -352,6 +425,22 @@ const buildNumericHeuristic = (key: string, language: UILanguage): FieldHelpEntr
           : 'Lower value decreases this term influence.',
     };
   }
+  if (/(slope|scale|gain)/.test(normalized)) {
+    return {
+      purpose:
+        language === 'zh'
+          ? '用于放大或压缩某个评分映射曲线的斜率/缩放系数。'
+          : 'Slope/scale factor that amplifies or compresses a score mapping curve.',
+      higher:
+        language === 'zh'
+          ? '绝对值更大通常会使分数变化更陡，边界附近样本更容易被拉开。'
+          : 'Larger magnitude typically makes score transitions steeper and separates boundary-near samples more aggressively.',
+      lower:
+        language === 'zh'
+          ? '绝对值更小会使映射更平缓，分数变化更温和，但边界区分可能减弱。'
+          : 'Smaller magnitude smooths the mapping, making score changes gentler but potentially weakening boundary separation.',
+    };
+  }
   return null;
 };
 
@@ -499,24 +588,14 @@ export const getFieldHelp = (
     return exactCatalog[normalizedPath.replace(/attack_configs\.\*./, 'attack_configs.')] as FieldHelpEntry;
   }
 
-  // fallback to English exact catalog if zh catalog has no entry
-  if (language === 'zh') {
-    if (EXACT_FIELD_HELP[path]) {
-      return EXACT_FIELD_HELP[path];
-    }
-    if (EXACT_FIELD_HELP[normalizedPath]) {
-      return EXACT_FIELD_HELP[normalizedPath];
-    }
-    if (EXACT_FIELD_HELP[normalizedPath.replace(/attack_configs\.\*./, 'attack_configs.')]) {
-      return EXACT_FIELD_HELP[normalizedPath.replace(/attack_configs\.\*./, 'attack_configs.')];
-    }
-  }
-
   if (isModelFieldKey(leaf)) {
     const role = getDetectorModelRole(detector, leaf);
     if (role) {
+      const roleLabel = localizeRoleLabel(role.label, language);
       return {
-        purpose: language === 'zh' ? `该模型字段角色：${role.label}。${role.purpose}` : role.purpose,
+        purpose: language === 'zh'
+          ? `该字段对应“${roleLabel}”角色，用于当前检测器的特定子模块。请根据该角色语义选择模型。`
+          : role.purpose,
         higher:
           language === 'zh'
             ? '不直接适用。这是模型选择，不是数值调节项。'
@@ -532,9 +611,6 @@ export const getFieldHelp = (
   if (leafCatalog[leaf]) {
     return leafCatalog[leaf] as FieldHelpEntry;
   }
-  if (language === 'zh' && LEAF_FIELD_HELP[leaf]) {
-    return LEAF_FIELD_HELP[leaf];
-  }
   return buildHeuristicHelp(normalizedPath, value, language);
 };
 
@@ -543,6 +619,9 @@ export const shouldShowHigherLower = (path: string, value: unknown): boolean => 
     return false;
   }
   const leaf = leafKey(path);
+  if (leaf === 'seed' || leaf === 'random_seed') {
+    return false;
+  }
   if (BOOLEAN_LIKE_KEYS.has(leaf)) {
     return false;
   }

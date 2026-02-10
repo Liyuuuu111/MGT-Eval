@@ -28,11 +28,102 @@ class HFLocalBackend:
     vllm_enforce_eager: bool = False
     vllm_trust_remote_code: bool = False
     vllm_disable_log_stats: bool = True
+    # vLLM custom all-reduce can fail on some driver/NCCL topologies in TP mode.
+    # Auto-enabled (disabled custom kernel) when tensor_parallel_size > 1.
+    vllm_disable_custom_all_reduce: bool = False
 
     name: str = "hf_local"
 
     _vllm: Any = field(default=None, init=False, repr=False)
     _vllm_failed: bool = field(default=False, init=False, repr=False)
+
+    def _resolve_device(self, raw_device: Optional[str]) -> str:
+        """
+        Normalize frontend/device YAML values to a valid torch device string.
+        Supports "auto" and invalid CUDA indices gracefully.
+        """
+        torch = self._torch
+        dv = str(raw_device or "").strip().lower()
+        if dv in ("", "auto"):
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        if dv == "cuda":
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        if dv.startswith("cuda"):
+            if not torch.cuda.is_available():
+                return "cpu"
+            if ":" not in dv:
+                return "cuda:0"
+            try:
+                idx = int(dv.split(":", 1)[1])
+            except Exception:
+                idx = 0
+            n_cuda = int(torch.cuda.device_count() or 0)
+            if n_cuda <= 0:
+                return "cpu"
+            if idx < 0 or idx >= n_cuda:
+                idx = 0
+            return f"cuda:{idx}"
+
+        if dv == "mps":
+            has_mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+            return "mps" if has_mps else ("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        if dv == "cpu":
+            return "cpu"
+
+        # Last-chance fallback for custom strings accepted by torch.device(...)
+        try:
+            _ = torch.device(dv)
+            return dv
+        except Exception:
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    def _normalize_vllm_parallelism(self) -> None:
+        """
+        Prevent common vLLM multi-GPU deadlocks on heterogeneous/misaligned devices.
+        """
+        torch = self._torch
+        if not bool(self.use_vllm):
+            return
+        if not torch.cuda.is_available():
+            print("[HFLocalBackend] CUDA is unavailable; fallback to HF backend without vLLM.")
+            self.use_vllm = False
+            return
+
+        n_cuda = int(torch.cuda.device_count() or 0)
+        if n_cuda <= 0:
+            self.use_vllm = False
+            print("[HFLocalBackend] No visible CUDA devices; fallback to HF backend without vLLM.")
+            return
+
+        tp_raw = int(self.vllm_tensor_parallel_size or 0)
+        tp = n_cuda if tp_raw <= 0 else tp_raw
+
+        if tp > n_cuda:
+            print(
+                "[HFLocalBackend] vLLM tensor_parallel_size "
+                f"{tp} exceeds visible CUDA devices ({n_cuda}); clamp to {n_cuda}."
+            )
+            tp = n_cuda
+
+        # Multi-GPU vLLM is fragile on heterogeneous GPU types; fail-safe to single GPU.
+        if tp > 1:
+            names: List[str] = []
+            for i in range(tp):
+                try:
+                    names.append(str(torch.cuda.get_device_name(i)))
+                except Exception:
+                    names.append(f"cuda:{i}")
+            if len(set(names)) > 1:
+                print(
+                    "[HFLocalBackend] Heterogeneous GPUs detected in visible set "
+                    f"{names}. For stability, fallback vLLM tensor_parallel_size to 1."
+                )
+                tp = 1
+
+        self.vllm_tensor_parallel_size = tp
 
     def __post_init__(self) -> None:
         try:
@@ -47,6 +138,8 @@ class HFLocalBackend:
         self._AutoTokenizer = AutoTokenizer
         self._AutoModelForCausalLM = AutoModelForCausalLM
         self.model = None
+        self.device = self._resolve_device(self.device)
+        self._normalize_vllm_parallelism()
 
         self.tokenizer = self._AutoTokenizer.from_pretrained(
             self.model_name_or_path,
@@ -70,17 +163,32 @@ class HFLocalBackend:
                     trust_remote_code=bool(self.vllm_trust_remote_code or self.trust_remote_code),
                     enforce_eager=bool(self.vllm_enforce_eager),
                     disable_log_stats=bool(self.vllm_disable_log_stats),
+                    disable_custom_all_reduce=bool(
+                        self.vllm_disable_custom_all_reduce
+                        or max(1, int(self.vllm_tensor_parallel_size)) > 1
+                    ),
+                )
+                print(
+                    "[HFLocalBackend] Initialize vLLM with "
+                    f"device={self.device}, tensor_parallel_size={kwargs['tensor_parallel_size']}, "
+                    f"dtype={kwargs['dtype']}, disable_custom_all_reduce={kwargs['disable_custom_all_reduce']}"
                 )
                 try:
                     self._vllm = LLM(**kwargs)
                 except TypeError:
                     # retry with conservative kwargs for older vLLM versions
-                    for k in ("trust_remote_code", "enforce_eager", "disable_log_stats"):
+                    for k in (
+                        "trust_remote_code",
+                        "enforce_eager",
+                        "disable_log_stats",
+                        "disable_custom_all_reduce",
+                    ):
                         kwargs.pop(k, None)
                     self._vllm = LLM(**kwargs)
                 if self._vllm is not None:
                     self.name = "hf_local_vllm"
-            except Exception:
+            except Exception as exc:
+                print(f"[HFLocalBackend] vLLM init failed, fallback to HF backend: {exc}")
                 self._vllm = None
                 self._vllm_failed = True
 

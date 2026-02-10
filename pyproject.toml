@@ -63,16 +63,10 @@ dependencies = [
   "matplotlib>=3.8",
   "pillow>=10.0",
   "faiss-cpu>=1.7.4",
-]
-
-[project.optional-dependencies]
-vllm = [
   "vllm>=0.6,<=0.12",
-]
-
-server = [
   "aiofiles",
 ]
+
 [project.scripts]
 mgt_eval = "mgt_eval.cli:main"
 mgteval  = "mgt_eval.cli:main"

@@ -85,6 +85,9 @@ export const api = {
   getCalibrators: (customDirs?: string) =>
     apiClient.get('/system/calibrators', { params: { custom_dirs: customDirs } }).then(r => r.data),
 
+  getCalibratorThresholds: (path: string) =>
+    apiClient.get('/system/calibrator-thresholds', { params: { path } }).then(r => r.data),
+
   cancelJob: (jobId: string) =>
     apiClient.post(`/system/cancel/${jobId}`).then(r => r.data),
 

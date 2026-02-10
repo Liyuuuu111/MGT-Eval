@@ -6,12 +6,6 @@ import { create } from 'zustand';
 import { LogEntry, UILanguage } from '../types';
 
 const getDefaultUILanguage = (): UILanguage => {
-  if (typeof navigator !== 'undefined') {
-    const lang = (navigator.language || '').toLowerCase();
-    if (lang.startsWith('zh')) {
-      return 'zh';
-    }
-  }
   return 'en';
 };
 

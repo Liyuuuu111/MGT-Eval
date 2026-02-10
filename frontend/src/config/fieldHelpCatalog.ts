@@ -69,6 +69,26 @@ export const EXACT_FIELD_HELP: Record<string, FieldHelpEntry> = {
     higher: 'Not directly applicable. This is a mode selection, not a scalar.',
     lower: 'Not directly applicable. Choose based on whether you want prompt context included in stored machine text.',
   },
+  enable_dataset_split: {
+    purpose: 'Enable optional post-build split of the output dataset into train/dev/test files.',
+    higher: 'Not directly applicable. Enabled writes extra split files next to the main output.',
+    lower: 'Not directly applicable. Disabled keeps only the main output file.',
+  },
+  split_train_ratio: {
+    purpose: 'Weight for assigning groups into the train split (range 0-10).',
+    higher: 'Higher values route more groups to train, increasing training volume.',
+    lower: 'Lower values reduce train coverage; 0 disables train split output.',
+  },
+  split_dev_ratio: {
+    purpose: 'Weight for assigning groups into the dev/validation split (range 0-10).',
+    higher: 'Higher values allocate more groups to dev, improving validation stability.',
+    lower: 'Lower values allocate fewer groups to dev; 0 disables dev split output.',
+  },
+  split_test_ratio: {
+    purpose: 'Weight for assigning groups into the test split (range 0-10).',
+    higher: 'Higher values allocate more groups to test, improving final evaluation reliability.',
+    lower: 'Lower values allocate fewer groups to test; 0 disables test split output.',
+  },
   detector: {
     purpose: 'Detector backend family used for evaluation or training.',
     higher: 'Not directly applicable. This is a model choice, not a scalar.',
@@ -129,9 +149,12 @@ export const EXACT_FIELD_HELP: Record<string, FieldHelpEntry> = {
     lower: 'Not directly applicable. Wrong path prevents calibrated inference.',
   },
   attack_dataset_only: {
-    purpose: 'Switch between dataset-level attack generation and full pipeline behavior.',
-    higher: 'Enabled focuses on producing attacked dataset artifacts only.',
-    lower: 'Disabled may run additional evaluation/build steps depending on config.',
+    purpose:
+      'Build mode switch: when enabled, the pipeline only generates attacked dataset files and skips normal text generation/evaluation quality metrics.',
+    higher:
+      'Set to 1 when your goal is to produce an attack dataset for downstream detection robustness testing.',
+    lower:
+      'Set to 0 for the full build pipeline (generation + optional quality metrics + optional attack stage).',
   },
   save_attack_outputs: {
     purpose: 'Whether to keep additional per-attack output artifacts.',
@@ -200,6 +223,30 @@ export const LEAF_FIELD_HELP: Record<string, FieldHelpEntry> = {
     purpose: 'Decision cutoff for machine/human classification.',
     higher: 'Higher threshold is stricter for machine label predictions.',
     lower: 'Lower threshold is more permissive for machine label predictions.',
+  },
+  calibrator_name: {
+    purpose:
+      'Calibration algorithm name used when fitting/reading detector calibration (for example `platt_lr` or other runner-supported calibrators). This choice controls how raw detector scores are transformed into probabilities.',
+    higher:
+      'Not directly applicable. This is an algorithm selection, not a scalar. Different calibrators change probability mapping behavior and compatibility with saved calibrator JSON.',
+    lower:
+      'Not directly applicable. Prefer a calibrator that matches your detector score shape (single-score vs multi-feature).',
+  },
+  auto_calibrate: {
+    purpose:
+      'If enabled, the detector will try to automatically locate and load a matching calibrator file when `calibrator_path` is not explicitly provided. Matching is based on detector/model naming heuristics and packaged/user calibration directories.',
+    higher:
+      'Not directly applicable. Enabled mode improves convenience but can load a stale or unintended calibrator if multiple similar files exist.',
+    lower:
+      'Not directly applicable. Disabled mode avoids accidental auto-loading and requires explicit calibrator selection.',
+  },
+  force_runner_calibration: {
+    purpose:
+      'Forces calibration in the evaluator/runner layer even when detector internals may already produce probabilities. Use this for controlled experiments where all detectors share one external calibration policy.',
+    higher:
+      'Not directly applicable. Enabled mode enforces runner-side mapping, improving consistency across runs but potentially overriding detector-native calibration behavior.',
+    lower:
+      'Not directly applicable. Disabled mode keeps detector-native probability behavior when available.',
   },
   pct_words_masked: {
     purpose: 'Fraction of words selected for perturbation in token-level attacks.',
@@ -350,9 +397,172 @@ export const LEAF_FIELD_HELP: Record<string, FieldHelpEntry> = {
     lower: 'Fewer runs are faster with higher variance.',
   },
   sample_k: {
-    purpose: 'Number of sampled items or perturbations.',
-    higher: 'More samples improve robustness but increase runtime.',
-    lower: 'Fewer samples are faster but noisier.',
+    purpose:
+      'Subsample size for quick experiments. Uses only the first/selected K records instead of the full dataset.',
+    higher:
+      'Larger K makes metrics closer to full-dataset behavior, but runtime and GPU/CPU cost increase.',
+    lower:
+      'Smaller K is faster for debugging, but metrics become noisier and less reliable for final conclusions.',
+  },
+  api_model: {
+    purpose:
+      'Model ID sent to the OpenAI-compatible API backend (for example `gpt-4o-mini` or your deployed model name).',
+    higher:
+      'Not directly applicable. Pick a model that matches your quality, latency, and cost target.',
+    lower:
+      'Not directly applicable. Smaller/cheaper API models are faster but may reduce generation quality.',
+  },
+  api_key: {
+    purpose:
+      'API credential used to authenticate requests to the model provider. Keep it secret and never share logs with raw keys.',
+    higher:
+      'Not directly applicable. Key length is irrelevant as long as the token is valid.',
+    lower:
+      'Not directly applicable. Empty/invalid keys will cause authorization failures.',
+  },
+  api_base: {
+    purpose:
+      'Base URL for OpenAI-compatible services. Leave empty for official OpenAI; set it when using Azure/vLLM/other compatible gateways.',
+    higher:
+      'Not directly applicable. Correct endpoint compatibility matters more than URL form.',
+    lower:
+      'Not directly applicable. Wrong base URL often causes 404/connection errors.',
+  },
+  api_endpoint: {
+    purpose:
+      'API route style: `chat` for chat-completions format, `completions` for legacy prompt-completion format.',
+    higher:
+      'Not directly applicable. Use the endpoint that your provider/model actually supports.',
+    lower:
+      'Not directly applicable. Mismatched endpoint type usually causes request schema errors.',
+  },
+  api_timeout: {
+    purpose:
+      'Maximum seconds to wait for each API response before aborting the request.',
+    higher:
+      'Higher timeout reduces premature timeout failures on slow networks/large outputs, but failed requests take longer to return.',
+    lower:
+      'Lower timeout fails faster and improves responsiveness, but may interrupt valid long-running requests.',
+  },
+  metric_ppl: {
+    purpose:
+      'Enable perplexity-based fluency scoring (`0` off, `1` on). Useful to measure whether generated/attacked text remains language-model plausible.',
+    higher:
+      'Not directly applicable. Enabled mode adds an extra scoring pass and more compute time.',
+    lower:
+      'Not directly applicable. Disabled mode is faster but removes this quality signal.',
+  },
+  ppl_model: {
+    purpose:
+      'Language model used to compute perplexity (for example `gpt2`). This model is only for scoring quality, not for generation.',
+    higher:
+      'Not directly applicable. Larger scorer models can be more faithful but are heavier and slower.',
+    lower:
+      'Not directly applicable. Smaller scorer models are cheap but may be less sensitive to subtle fluency issues.',
+  },
+  ppl_device: {
+    purpose:
+      'Execution device for perplexity scoring (for example `cuda:0` or `cpu`).',
+    higher:
+      'Not directly applicable. GPU is usually faster; CPU is safer when GPU memory is tight.',
+    lower:
+      'Not directly applicable. Using CPU avoids VRAM contention but significantly increases latency.',
+  },
+  ppl_dtype: {
+    purpose:
+      'Numeric precision for perplexity scoring model (`auto`, `float16`, `bfloat16`, `float32`).',
+    higher:
+      'Not directly applicable. Higher precision (float32) is safer numerically but slower and heavier.',
+    lower:
+      'Not directly applicable. Lower precision is faster and lighter but may slightly shift scores.',
+  },
+  ppl_stride: {
+    purpose:
+      'Sliding-window stride for perplexity over long texts. Controls how much context windows overlap.',
+    higher:
+      'Larger stride runs faster (fewer windows) but can reduce scoring fidelity near window boundaries.',
+    lower:
+      'Smaller stride increases overlap and score stability, but costs more compute time.',
+  },
+  ppl_max_length: {
+    purpose:
+      'Maximum token length per perplexity window. Longer texts are chunked according to this limit.',
+    higher:
+      'Higher values preserve more context in each window, but increase memory usage and latency.',
+    lower:
+      'Lower values are lighter and safer, but may lose long-range context information.',
+  },
+  metric_readability: {
+    purpose:
+      'Enable readability metrics (`0` off, `1` on) to estimate how easy generated text is to read.',
+    higher:
+      'Not directly applicable. Enabled mode adds extra post-processing time.',
+    lower:
+      'Not directly applicable. Disabled mode is faster but provides no readability feedback.',
+  },
+  metric_bertscore: {
+    purpose:
+      'Enable BERTScore semantic similarity metric (`0` off, `1` on), often used to compare rewritten text against the source.',
+    higher:
+      'Not directly applicable. Enabled mode improves semantic quality visibility but is compute-heavy.',
+    lower:
+      'Not directly applicable. Disabled mode is faster but loses semantic similarity tracking.',
+  },
+  bertscore_model: {
+    purpose:
+      'Encoder model used for BERTScore (for example `roberta-large`).',
+    higher:
+      'Not directly applicable. Larger models can provide richer semantic signals but are slower.',
+    lower:
+      'Not directly applicable. Smaller models are cheaper but may miss nuanced semantic changes.',
+  },
+  bertscore_device: {
+    purpose:
+      'Execution device for BERTScore computation.',
+    higher:
+      'Not directly applicable. GPU greatly speeds up large-batch semantic scoring.',
+    lower:
+      'Not directly applicable. CPU scoring is slower but useful when GPU resources are occupied.',
+  },
+  bertscore_lang: {
+    purpose:
+      'Language code used by BERTScore tokenization defaults (for example `en`, `zh`).',
+    higher:
+      'Not directly applicable. Use the language matching your data to avoid tokenization mismatch.',
+    lower:
+      'Not directly applicable. Wrong language settings can bias semantic scores.',
+  },
+  bertscore_batch_size: {
+    purpose:
+      'Batch size for BERTScore embedding inference.',
+    higher:
+      'Higher batch size improves throughput, but quickly increases VRAM usage.',
+    lower:
+      'Lower batch size is memory-safe, but overall semantic scoring is slower.',
+  },
+  bertscore_rescale: {
+    purpose:
+      'Whether to apply baseline rescaling to BERTScore output (`0` off, `1` on).',
+    higher:
+      'Set to 1 when you want scores normalized to be more comparable across examples.',
+    lower:
+      'Set to 0 to keep raw BERTScore values; useful when you prefer unadjusted outputs.',
+  },
+  only_attack_machine: {
+    purpose:
+      'When enabled, attacks are applied only to records whose label equals `machine_label`.',
+    higher:
+      'Set to 1 to focus perturbations on machine-generated samples and reduce unnecessary attack cost.',
+    lower:
+      'Set to 0 to attack all samples, which is broader but may dilute machine-focused robustness analysis.',
+  },
+  machine_label: {
+    purpose:
+      'Numeric label value treated as machine-generated class when filtering attack targets (commonly `1`).',
+    higher:
+      'Higher values only help if your dataset actually uses that label for machine text.',
+    lower:
+      'Lower values only help if your dataset encodes machine text with a lower label (for example `0`).',
   },
   num_workers: {
     purpose: 'Parallel worker processes for data loading/preprocessing.',
@@ -483,6 +693,26 @@ export const EXACT_FIELD_HELP_ZH: Partial<Record<string, FieldHelpEntry>> = {
     higher: '不直接适用。这是模式选择，不是数值大小。',
     lower: '不直接适用。应根据你是否需要保留 prompt 上下文来选择。',
   },
+  enable_dataset_split: {
+    purpose: '是否启用构建完成后的 train/dev/test 拆分输出。',
+    higher: '不直接适用。启用后会在主输出旁新增拆分文件。',
+    lower: '不直接适用。关闭后仅保留主输出文件。',
+  },
+  split_train_ratio: {
+    purpose: 'train 划分权重（范围 0-10）。',
+    higher: '值更高会让更多样本组分配到 train，训练数据更充足。',
+    lower: '值更低会减少 train 覆盖；设为 0 表示不生成 train 划分文件。',
+  },
+  split_dev_ratio: {
+    purpose: 'dev/验证集划分权重（范围 0-10）。',
+    higher: '值更高会分配更多样本组到 dev，验证指标更稳定。',
+    lower: '值更低会减少 dev 覆盖；设为 0 表示不生成 dev 划分文件。',
+  },
+  split_test_ratio: {
+    purpose: 'test 划分权重（范围 0-10）。',
+    higher: '值更高会分配更多样本组到 test，最终评估统计更稳定。',
+    lower: '值更低会减少 test 覆盖；设为 0 表示不生成 test 划分文件。',
+  },
   detector: {
     purpose: '当前任务使用的检测器类型。',
     higher: '不直接适用。检测器是类别选择，不是数值调节。',
@@ -565,6 +795,12 @@ export const LEAF_FIELD_HELP_ZH: Partial<Record<string, FieldHelpEntry>> = {
     higher: '更大可加快评估，但更容易触发显存不足。',
     lower: '更小更稳定，但评估更慢。',
   },
+  seed: {
+    purpose:
+      '随机种子，用于控制可复现实验中的随机过程（如采样、打乱、初始化）。通常固定为同一个值以保证多次运行可对齐比较。',
+    higher: '不直接适用。种子不是“越大越好”的调参项，不同数值只代表不同随机序列。',
+    lower: '不直接适用。关键是是否固定一致，而不是数值大小。',
+  },
   epochs: {
     purpose: '训练轮数（完整遍历训练集的次数）。',
     higher: '轮数更多可能提升拟合效果，但过拟合风险和耗时上升。',
@@ -584,6 +820,182 @@ export const LEAF_FIELD_HELP_ZH: Partial<Record<string, FieldHelpEntry>> = {
     purpose: '人类/机器分类阈值。',
     higher: '阈值更高时，判为机器通常更严格，误报可能降低。',
     lower: '阈值更低时，判为机器更宽松，召回通常更高。',
+  },
+  sample_k: {
+    purpose:
+      '快速实验子采样数量。只使用 K 条样本而非全量数据，常用于调参和冒烟测试。',
+    higher:
+      'K 更大时结果更接近全量评估，但运行耗时和资源占用上升。',
+    lower:
+      'K 更小时调试更快，但指标波动会更大，不适合最终结论。',
+  },
+  api_model: {
+    purpose:
+      '发送给 OpenAI 兼容接口的模型名称（例如 `gpt-4o-mini` 或你部署服务的模型名）。',
+    higher:
+      '不直接适用。应按“效果/速度/成本”选择模型，而不是看字符串大小。',
+    lower:
+      '不直接适用。更小或更便宜的模型通常更快，但生成质量可能下降。',
+  },
+  api_key: {
+    purpose:
+      '调用 API 所需的鉴权密钥。请妥善保管，不要在日志或截图中暴露明文。',
+    higher:
+      '不直接适用。密钥长度不重要，关键是该密钥是否有效且权限足够。',
+    lower:
+      '不直接适用。为空或无效会导致 401/403 鉴权失败。',
+  },
+  api_base: {
+    purpose:
+      'OpenAI 兼容服务的基础地址。官方 OpenAI 通常可留空；使用 Azure/vLLM/代理网关时需填写对应地址。',
+    higher:
+      '不直接适用。关键是地址是否与服务协议兼容。',
+    lower:
+      '不直接适用。地址错误通常会触发连接失败或 404。',
+  },
+  api_endpoint: {
+    purpose:
+      '接口类型选择：`chat` 使用聊天格式，`completions` 使用传统补全格式。',
+    higher:
+      '不直接适用。请选择服务端实际支持的接口类型。',
+    lower:
+      '不直接适用。接口类型与服务不匹配时，常见报错是请求字段格式不兼容。',
+  },
+  api_timeout: {
+    purpose:
+      '每次 API 请求允许等待的最长秒数，超时后该请求会被终止。',
+    higher:
+      '超时更长可减少“误超时”，适合慢网络或长输出任务，但失败请求返回更慢。',
+    lower:
+      '超时更短可更快发现异常并返回，但长请求更容易被提前中断。',
+  },
+  metric_ppl: {
+    purpose:
+      '是否启用困惑度（PPL）质量指标（0=关闭，1=开启），用于评估文本语言流畅性。',
+    higher:
+      '不直接适用。开启后会增加一次额外模型打分，耗时上升。',
+    lower:
+      '不直接适用。关闭后运行更快，但缺少流畅性指标。',
+  },
+  ppl_model: {
+    purpose:
+      '用于计算 PPL 的评分模型（如 `gpt2`）。该模型只用于质量评估，不参与生成。',
+    higher:
+      '不直接适用。更大评分模型通常更敏感，但计算更重。',
+    lower:
+      '不直接适用。更小评分模型更快更省，但对细微质量差异不够敏感。',
+  },
+  ppl_device: {
+    purpose:
+      'PPL 评分使用的设备（如 `cuda:0` 或 `cpu`）。',
+    higher:
+      '不直接适用。GPU 通常更快，CPU 在显存紧张时更稳妥。',
+    lower:
+      '不直接适用。切到 CPU 会明显变慢，但可避免 GPU 资源争抢。',
+  },
+  ppl_dtype: {
+    purpose:
+      'PPL 评分模型的计算精度（`auto`、`float16`、`bfloat16`、`float32`）。',
+    higher:
+      '不直接适用。高精度（如 float32）更稳，但更慢、更占显存。',
+    lower:
+      '不直接适用。低精度更快更省，但分数可能有轻微偏移。',
+  },
+  ppl_stride: {
+    purpose:
+      '长文本 PPL 计算时滑窗步长。用于控制窗口重叠程度。',
+    higher:
+      '步长更大时窗口更少，速度更快，但边界位置分数可能不够稳定。',
+    lower:
+      '步长更小时窗口重叠更多，分数更稳，但计算开销更高。',
+  },
+  ppl_max_length: {
+    purpose:
+      '每个 PPL 窗口允许的最大 token 长度。',
+    higher:
+      '上限更高可保留更多上下文，但显存与时延都会上升。',
+    lower:
+      '上限更低更轻量，但可能损失长程上下文信息。',
+  },
+  metric_readability: {
+    purpose:
+      '是否启用可读性指标（0=关闭，1=开启），用于衡量文本易读程度。',
+    higher:
+      '不直接适用。开启后可读性分析更完整，但会增加后处理耗时。',
+    lower:
+      '不直接适用。关闭后更快，但无法得到可读性反馈。',
+  },
+  metric_bertscore: {
+    purpose:
+      '是否启用 BERTScore 语义相似度指标（0=关闭，1=开启），常用于比较改写前后语义保持。',
+    higher:
+      '不直接适用。开启后语义评估更全面，但计算成本较高。',
+    lower:
+      '不直接适用。关闭后运行更快，但缺少语义一致性指标。',
+  },
+  bertscore_model: {
+    purpose:
+      'BERTScore 使用的编码模型（如 `roberta-large`）。',
+    higher:
+      '不直接适用。更大模型语义表达更强，但速度更慢、资源占用更高。',
+    lower:
+      '不直接适用。更小模型更快，但语义分辨率可能下降。',
+  },
+  bertscore_device: {
+    purpose:
+      'BERTScore 计算设备。',
+    higher:
+      '不直接适用。GPU 能明显加速大批量语义评分。',
+    lower:
+      '不直接适用。CPU 更慢，但在 GPU 忙时更容易落地。',
+  },
+  bertscore_lang: {
+    purpose:
+      'BERTScore 语言代码（如 `en`、`zh`），用于匹配分词和语言设置。',
+    higher:
+      '不直接适用。应选择与文本语言一致的代码，避免评分偏差。',
+    lower:
+      '不直接适用。语言设置错误会导致相似度分数失真。',
+  },
+  bertscore_batch_size: {
+    purpose:
+      'BERTScore 推理批大小。',
+    higher:
+      '更大批大小可提升吞吐，但显存压力显著增加。',
+    lower:
+      '更小批大小更安全，但计算总时长更长。',
+  },
+  bertscore_rescale: {
+    purpose:
+      '是否对 BERTScore 结果做 baseline 重标定（0=关闭，1=开启）。',
+    higher:
+      '取 1 时分数更便于跨样本比较，适合做横向分析。',
+    lower:
+      '取 0 时保留原始分数，适合需要原值对比的场景。',
+  },
+  calibrator_name: {
+    purpose:
+      '校准算法名称（例如 `platt_lr` 或其他 runner 支持的校准器）。该选项决定如何把检测器原始分数映射为概率，并影响与已保存校准器 JSON 的兼容性。',
+    higher:
+      '不直接适用。这是算法类型选择，不是数值大小。不同算法会改变概率映射形状与稳定性。',
+    lower:
+      '不直接适用。应根据分数形态选择（单分数映射或多特征映射）。',
+  },
+  auto_calibrate: {
+    purpose:
+      '启用后，在未显式填写 `calibrator_path` 时，系统会按检测器/模型命名规则自动搜索并加载最匹配的校准器文件（含内置与用户目录）。',
+    higher:
+      '不直接适用。开启后配置更省事，但当目录中存在多个相近文件时可能加载到非预期校准器。',
+    lower:
+      '不直接适用。关闭后需要手动指定校准器路径，但结果来源更可控、可复现性更强。',
+  },
+  force_runner_calibration: {
+    purpose:
+      '强制在 evaluator/runner 层执行校准映射，即使检测器自身已输出概率也仍按 runner 逻辑重映射。适用于跨检测器对齐实验设置。',
+    higher:
+      '不直接适用。开启后可提高不同检测器之间的概率口径一致性，但可能覆盖检测器内置校准行为。',
+    lower:
+      '不直接适用。关闭后优先使用检测器原生概率输出与内部校准路径。',
   },
   pct_words_masked: {
     purpose: '攻击时参与扰动的词比例。',
@@ -679,6 +1091,30 @@ export const LEAF_FIELD_HELP_ZH: Partial<Record<string, FieldHelpEntry>> = {
     purpose: '最大新生成 token 数。',
     higher: '更大允许更长输出，但延迟更高。',
     lower: '更小可缩短输出并降低延迟。',
+  },
+  attack_dataset_only: {
+    purpose:
+      '构建模式开关：开启后只产出攻击数据集，不执行常规生成与质量评估流程。',
+    higher:
+      '设为 1 适合专门准备攻击数据集做鲁棒性评测，流程更聚焦。',
+    lower:
+      '设为 0 则运行完整 Build 流程（生成 + 可选质量指标 + 可选攻击）。',
+  },
+  only_attack_machine: {
+    purpose:
+      '是否只对机器标签样本执行攻击（1=只攻击机器样本，0=全部样本都可攻击）。',
+    higher:
+      '设为 1 可聚焦机器文本攻击，成本更低，也更贴合 ASR 场景。',
+    lower:
+      '设为 0 攻击覆盖更全面，但可能引入与目标无关的扰动样本。',
+  },
+  machine_label: {
+    purpose:
+      '当 `only_attack_machine=1` 时，指定“机器文本”的标签值（常见为 1）。',
+    higher:
+      '只有当数据集确实用更高标签表示机器文本时才应升高该值。',
+    lower:
+      '只有当数据集用更低标签表示机器文本时才应降低该值。',
   },
   model: {
     purpose: '任务使用的模型名称或本地路径。',

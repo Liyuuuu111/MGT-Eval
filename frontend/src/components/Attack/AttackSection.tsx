@@ -18,6 +18,7 @@ import { useUILanguage } from '../../hooks/useUILanguage';
 import api from '../../services/api';
 import { formatAttackLabel } from './attackLabels';
 import { AttackMethodIntroPanel } from './AttackMethodIntroPanel';
+import { START_SECTION_EVENT, StartSectionEventDetail } from '../../constants/jobControls';
 
 // Helper function to split config keys for balanced layout
 const splitConfigKeys = (config: any, mainKeys: string[]): { leftKeys: string[], rightKeys: string[] } => {
@@ -45,6 +46,7 @@ export const AttackSection: React.FC = () => {
   const [attackOptions, setAttackOptions] = useState<Array<{ key: string; attack: any }>>([]);
   const [hfEndpoint, setHfEndpoint] = useState<string>('');
   const { language } = useUILanguage();
+  const watchedGpuIds = Form.useWatch('gpu_ids', form);
 
   const isLikelyInChina = useMemo(() => {
     const nav = window.navigator;
@@ -83,6 +85,24 @@ export const AttackSection: React.FC = () => {
   } = useStore();
 
   useWebSocket({ jobId: attackJobId, section: 'attack', isRunning: isAttackRunning });
+
+  useEffect(() => {
+    const handleStartRequest = (event: Event) => {
+      const detail = (event as CustomEvent<StartSectionEventDetail>).detail;
+      if (detail?.section !== 'attack') {
+        return;
+      }
+      if (isAttackRunning || loading) {
+        return;
+      }
+      form.submit();
+    };
+
+    window.addEventListener(START_SECTION_EVENT, handleStartRequest as EventListener);
+    return () => {
+      window.removeEventListener(START_SECTION_EVENT, handleStartRequest as EventListener);
+    };
+  }, [form, isAttackRunning, loading]);
 
   // Dynamically split config keys for balanced layout
   const { leftKeys, rightKeys } = useMemo(() => {
@@ -131,6 +151,27 @@ export const AttackSection: React.FC = () => {
     };
     loadData();
   }, [form]);
+
+  useEffect(() => {
+    if (!templateConfig || !Object.prototype.hasOwnProperty.call(templateConfig, 'vllm_tensor_parallel_size')) {
+      return;
+    }
+    if (form.isFieldTouched('vllm_tensor_parallel_size')) {
+      return;
+    }
+
+    const gpuCount = Array.isArray(watchedGpuIds)
+      ? watchedGpuIds.filter((id) => Number.isFinite(id)).length
+      : (typeof watchedGpuIds === 'number' && Number.isFinite(watchedGpuIds) ? 1 : 0);
+    if (gpuCount <= 0) {
+      return;
+    }
+
+    const current = Number(form.getFieldValue('vllm_tensor_parallel_size'));
+    if (!Number.isFinite(current) || current !== gpuCount) {
+      form.setFieldValue('vllm_tensor_parallel_size', gpuCount);
+    }
+  }, [templateConfig, watchedGpuIds, form]);
 
   // Initialize attack configs when attacks are selected
   useEffect(() => {

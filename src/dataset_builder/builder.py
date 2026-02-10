@@ -221,6 +221,180 @@ def _infer_model_short_name(model_ref: Optional[str]) -> Optional[str]:
 
     return s
 
+
+def _clamp_split_ratio(value: Any) -> int:
+    try:
+        ratio = int(value)
+    except Exception:
+        ratio = 0
+    return max(0, min(10, ratio))
+
+
+def _derive_split_group_key(record: Dict[str, Any], row_idx: int) -> str:
+    """
+    Keep related human/machine pairs in the same split whenever possible.
+    """
+    rid = str(record.get("id", "") or "").strip()
+    if rid:
+        if rid.endswith("-human"):
+            return rid[:-6]
+        if rid.endswith("-gen"):
+            return rid[:-4]
+        return rid
+
+    human_id = str(record.get("human_id", "") or "").strip()
+    if human_id:
+        if human_id.endswith("-human"):
+            return human_id[:-6]
+        return human_id
+
+    meta = record.get("meta", {}) if isinstance(record.get("meta", {}), dict) else {}
+    source = str((meta.get("base_source", {}) or {}).get("source_id", "")).strip() if isinstance(meta.get("base_source", {}), dict) else ""
+    if source:
+        return source
+
+    txt = str(record.get("text", "") or "").strip()
+    if txt:
+        return _stable_hash(txt)
+
+    return f"row_{row_idx}"
+
+
+def _pick_split_target(group_key: str, *, seed: int, ratios: Dict[str, int]) -> Optional[str]:
+    active = [(name, weight) for name, weight in ratios.items() if int(weight) > 0]
+    total = sum(weight for _, weight in active)
+    if total <= 0:
+        return None
+
+    digest = hashlib.sha1(f"{seed}:{group_key}".encode("utf-8", errors="ignore")).hexdigest()
+    slot = int(digest[:12], 16) % total
+    acc = 0
+    for name, weight in active:
+        acc += weight
+        if slot < acc:
+            return name
+    return active[-1][0]
+
+
+def _write_dataset_splits(
+    *,
+    out_jsonl: str,
+    seed: int,
+    enabled: bool,
+    train_ratio: int,
+    dev_ratio: int,
+    test_ratio: int,
+) -> Dict[str, Any]:
+    ratios = {
+        "train": _clamp_split_ratio(train_ratio),
+        "dev": _clamp_split_ratio(dev_ratio),
+        "test": _clamp_split_ratio(test_ratio),
+    }
+    if not enabled:
+        return {
+            "enabled": False,
+            "applied": False,
+            "reason": "disabled",
+            "ratios": ratios,
+            "files": {},
+            "group_counts": {},
+            "record_counts": {},
+        }
+
+    total = int(ratios["train"] + ratios["dev"] + ratios["test"])
+    if total <= 0:
+        return {
+            "enabled": True,
+            "applied": False,
+            "reason": "all ratios are zero",
+            "ratios": ratios,
+            "files": {},
+            "group_counts": {},
+            "record_counts": {},
+        }
+
+    out_path = Path(out_jsonl)
+    split_files: Dict[str, str] = {}
+    writers: Dict[str, Any] = {}
+    for split_name, weight in ratios.items():
+        if weight <= 0:
+            continue
+        split_path = out_path.with_name(f"{out_path.stem}.{split_name}{out_path.suffix}")
+        split_path.parent.mkdir(parents=True, exist_ok=True)
+        writers[split_name] = open(split_path, "w", encoding="utf-8")
+        split_files[split_name] = str(split_path)
+
+    group_target: Dict[str, str] = {}
+    group_counts: Dict[str, int] = {k: 0 for k in split_files.keys()}
+    record_counts: Dict[str, int] = {k: 0 for k in split_files.keys()}
+
+    try:
+        with open(out_jsonl, "r", encoding="utf-8") as f:
+            for idx, line in enumerate(f):
+                raw = line.rstrip("\n")
+                if not raw.strip():
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except Exception:
+                    rec = {}
+
+                gkey = _derive_split_group_key(rec if isinstance(rec, dict) else {}, row_idx=idx)
+                target = group_target.get(gkey)
+                if target is None:
+                    picked = _pick_split_target(gkey, seed=seed, ratios=ratios)
+                    if picked is None:
+                        continue
+                    target = picked
+                    group_target[gkey] = target
+                    if target in group_counts:
+                        group_counts[target] += 1
+
+                w = writers.get(target)
+                if w is None:
+                    continue
+                w.write(raw + "\n")
+                record_counts[target] = int(record_counts.get(target, 0)) + 1
+    finally:
+        for w in writers.values():
+            try:
+                w.close()
+            except Exception:
+                pass
+
+    return {
+        "enabled": True,
+        "applied": True,
+        "reason": "ok",
+        "ratios": ratios,
+        "files": split_files,
+        "group_counts": group_counts,
+        "record_counts": record_counts,
+    }
+
+
+def _maybe_remove_unsplit_output(out_jsonl: str, split_stats: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    When dataset split is enabled and applied, keep only split artifacts and remove
+    the original unsplit output file.
+    """
+    removed = False
+    remove_error: Optional[str] = None
+    should_remove = bool(split_stats.get("enabled", False)) and bool(split_stats.get("applied", False))
+    if should_remove:
+        out_path = Path(out_jsonl)
+        if out_path.exists():
+            try:
+                out_path.unlink()
+                removed = True
+            except Exception as exc:
+                remove_error = str(exc)
+    return {
+        "unsplit_removed": removed,
+        "unsplit_remove_error": remove_error,
+    }
+
+
 class DatasetBuilder:
     def __init__(
         self,
@@ -843,6 +1017,16 @@ class DatasetBuilder:
             except Exception:
                 pass
 
+        split_stats = _write_dataset_splits(
+            out_jsonl=self.cfg.out_jsonl,
+            seed=int(self.cfg.sample_seed),
+            enabled=bool(getattr(self.cfg, "enable_dataset_split", False)),
+            train_ratio=int(getattr(self.cfg, "split_train_ratio", 8)),
+            dev_ratio=int(getattr(self.cfg, "split_dev_ratio", 1)),
+            test_ratio=int(getattr(self.cfg, "split_test_ratio", 1)),
+        )
+        cleanup_stats = _maybe_remove_unsplit_output(self.cfg.out_jsonl, split_stats)
+
         # ---- save global quality means to file (sample-average) ----
         quality_means_path: Optional[str] = None
         quality_means: Optional[Dict[str, Any]] = None
@@ -864,6 +1048,9 @@ class DatasetBuilder:
 
         return {
             "out_jsonl": self.cfg.out_jsonl,
+            "out_jsonl_exists": not bool(cleanup_stats.get("unsplit_removed", False)),
+            "unsplit_removed": bool(cleanup_stats.get("unsplit_removed", False)),
+            "unsplit_remove_error": cleanup_stats.get("unsplit_remove_error"),
             "attack_folder": attack_folder,
             "attack_file": attack_file,
             "per_attack_files": per_attack_files,
@@ -876,6 +1063,13 @@ class DatasetBuilder:
             "num_quality_records": int(n_quality),
             "quality_means_path": quality_means_path,
             "quality_means": quality_means,
+            "split_enabled": bool(split_stats.get("enabled", False)),
+            "split_applied": bool(split_stats.get("applied", False)),
+            "split_reason": split_stats.get("reason"),
+            "split_ratios": split_stats.get("ratios", {}),
+            "split_files": split_stats.get("files", {}),
+            "split_group_counts": split_stats.get("group_counts", {}),
+            "split_record_counts": split_stats.get("record_counts", {}),
         }
     
     def _build_attack_only(self, examples: List[Dict[str, Any]], group_cols: Any) -> Dict[str, Any]:
@@ -1229,6 +1423,16 @@ class DatasetBuilder:
             except Exception:
                 pass
 
+        split_stats = _write_dataset_splits(
+            out_jsonl=self.cfg.out_jsonl,
+            seed=int(self.cfg.sample_seed),
+            enabled=bool(getattr(self.cfg, "enable_dataset_split", False)),
+            train_ratio=int(getattr(self.cfg, "split_train_ratio", 8)),
+            dev_ratio=int(getattr(self.cfg, "split_dev_ratio", 1)),
+            test_ratio=int(getattr(self.cfg, "split_test_ratio", 1)),
+        )
+        cleanup_stats = _maybe_remove_unsplit_output(self.cfg.out_jsonl, split_stats)
+
         per_attack_files: Dict[str, str] = {}
         attack_folder: Optional[str] = None
         attack_file: Optional[str] = None
@@ -1241,6 +1445,9 @@ class DatasetBuilder:
 
         return {
             "out_jsonl": self.cfg.out_jsonl,
+            "out_jsonl_exists": not bool(cleanup_stats.get("unsplit_removed", False)),
+            "unsplit_removed": bool(cleanup_stats.get("unsplit_removed", False)),
+            "unsplit_remove_error": cleanup_stats.get("unsplit_remove_error"),
             "attack_folder": attack_folder,
             "attack_file": attack_file,
             "per_attack_files": per_attack_files,
@@ -1249,5 +1456,12 @@ class DatasetBuilder:
             "num_selected": int(n_selected),
             "num_written": int(n_written),
             "num_attack_variants": int(n_attack_variants),
+            "split_enabled": bool(split_stats.get("enabled", False)),
+            "split_applied": bool(split_stats.get("applied", False)),
+            "split_reason": split_stats.get("reason"),
+            "split_ratios": split_stats.get("ratios", {}),
+            "split_files": split_stats.get("files", {}),
+            "split_group_counts": split_stats.get("group_counts", {}),
+            "split_record_counts": split_stats.get("record_counts", {}),
             "note": "attack-only outputs are schema-aligned with normal build (original/prompt/sample/meta/tokens/lang/model).",
         }

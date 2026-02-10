@@ -2,14 +2,16 @@
  * Main App Component
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Layout, Menu, Typography, message, Tag, Space } from 'antd';
 import {
-  BuildOutlined,
-  BugOutlined,
+  AimOutlined,
+  DatabaseOutlined,
   ExperimentOutlined,
-  EyeOutlined,
   PlayCircleOutlined,
+  RocketOutlined,
+  StopOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
 import { BuildSection } from './components/Build/BuildSection';
 import { AttackSection } from './components/Attack/AttackSection';
@@ -18,20 +20,27 @@ import { DetectSection } from './components/Detect/DetectSection';
 import { DemoSection } from './components/Demo/DemoSection';
 import { SystemMonitorPanel } from './components/Shared/SystemMonitorPanel';
 import { LanguageSwitcher } from './components/Shared/LanguageSwitcher';
+import { useUILanguage } from './hooks/useUILanguage';
 import { useStore } from './store';
 import api from './services/api';
+import { dispatchStartSection } from './constants/jobControls';
+import { Section } from './types';
 
 const { Header, Sider, Content } = Layout;
 const { Title } = Typography;
 
-type SectionKey = 'build' | 'attack' | 'train' | 'detect' | 'demo';
+type SectionKey = Section;
 
 const App: React.FC = () => {
   const [activeSection, setActiveSection] = useState<SectionKey>('demo');
+  const { t, language } = useUILanguage();
   const [backendStatus, setBackendStatus] = useState<{
     connected: boolean | null;
     latencyMs: number | null;
   }>({ connected: null, latencyMs: null });
+  const [isStopping, setIsStopping] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const startFlashTimerRef = useRef<number | null>(null);
   const {
     buildJobId,
     isBuildRunning,
@@ -49,6 +58,10 @@ const App: React.FC = () => {
     isDetectRunning,
     stopDetect,
     addDetectLog,
+    demoJobId,
+    isDemoRunning,
+    stopDemo,
+    addDemoLog,
   } = useStore((state) => ({
     buildJobId: state.buildJobId,
     isBuildRunning: state.isBuildRunning,
@@ -66,6 +79,10 @@ const App: React.FC = () => {
     isDetectRunning: state.isDetectRunning,
     stopDetect: state.stopDetect,
     addDetectLog: state.addDetectLog,
+    demoJobId: state.demoJobId,
+    isDemoRunning: state.isDemoRunning,
+    stopDemo: state.stopDemo,
+    addDemoLog: state.addDemoLog,
   }));
 
   const runningJobs = [
@@ -97,9 +114,39 @@ const App: React.FC = () => {
       stop: stopDetect,
       addLog: addDetectLog,
     },
+    {
+      section: 'demo' as SectionKey,
+      jobId: demoJobId,
+      isRunning: isDemoRunning,
+      stop: stopDemo,
+      addLog: addDemoLog,
+    },
   ];
 
   const hasRunningJob = runningJobs.some((job) => job.isRunning && job.jobId);
+  const activeSectionJob = runningJobs.find((job) => job.section === activeSection);
+  const isActiveSectionRunning = Boolean(activeSectionJob?.isRunning && activeSectionJob?.jobId);
+
+  const startButtonText = useMemo(() => {
+    if (language === 'zh') {
+      const zhMap: Record<SectionKey, string> = {
+        demo: '开始演示检测',
+        build: '开始构建数据集',
+        attack: '开始攻击数据集',
+        train: '开始训练检测器',
+        detect: '开始评估',
+      };
+      return zhMap[activeSection];
+    }
+    const enMap: Record<SectionKey, string> = {
+      demo: 'Start Demo Detection',
+      build: 'Start Build',
+      attack: 'Start Attack',
+      train: 'Start Training',
+      detect: 'Start Evaluation',
+    };
+    return enMap[activeSection];
+  }, [activeSection, language]);
 
   useEffect(() => {
     let mounted = true;
@@ -127,7 +174,31 @@ const App: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (startFlashTimerRef.current !== null) {
+        window.clearTimeout(startFlashTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleStartCurrent = () => {
+    if (isActiveSectionRunning) {
+      return;
+    }
+    dispatchStartSection(activeSection);
+    setIsStarting(true);
+    if (startFlashTimerRef.current !== null) {
+      window.clearTimeout(startFlashTimerRef.current);
+    }
+    startFlashTimerRef.current = window.setTimeout(() => {
+      setIsStarting(false);
+      startFlashTimerRef.current = null;
+    }, 700);
+  };
+
   const handleStopRunning = async () => {
+    setIsStopping(true);
     const activeJob = runningJobs.find(
       (job) => job.section === activeSection && job.isRunning && job.jobId
     );
@@ -135,6 +206,7 @@ const App: React.FC = () => {
       ? [activeJob]
       : runningJobs.filter((job) => job.isRunning && job.jobId);
     if (jobsToCancel.length === 0) {
+      setIsStopping(false);
       return;
     }
 
@@ -162,14 +234,15 @@ const App: React.FC = () => {
     } else {
       message.info('Cancellation requested');
     }
+    setIsStopping(false);
   };
 
   const menuItems = [
-    { key: 'demo', icon: <PlayCircleOutlined />, label: 'Demo' },
-    { key: 'build', icon: <BuildOutlined />, label: 'Build Dataset' },
-    { key: 'attack', icon: <BugOutlined />, label: 'Attack Dataset' },
-    { key: 'train', icon: <ExperimentOutlined />, label: 'Train Detector' },
-    { key: 'detect', icon: <EyeOutlined />, label: 'Detect' },
+    { key: 'demo', icon: <RocketOutlined />, label: t('menuDemo') },
+    { key: 'build', icon: <DatabaseOutlined />, label: t('menuBuild') },
+    { key: 'attack', icon: <ThunderboltOutlined />, label: t('menuAttack') },
+    { key: 'train', icon: <ExperimentOutlined />, label: t('menuTrain') },
+    { key: 'detect', icon: <AimOutlined />, label: t('menuDetect') },
   ];
 
   const renderSection = () => {
@@ -193,7 +266,7 @@ const App: React.FC = () => {
     <Layout style={{ minHeight: '100vh' }}>
       <Header
         style={{
-          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%)',
           padding: '0 24px',
           position: 'fixed',
           width: '100%',
@@ -203,25 +276,71 @@ const App: React.FC = () => {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '100%' }}>
-          <Title level={3} style={{ color: 'white', margin: 0 }}>
-            MGT Eval - Machine Generated Text Evaluation
-          </Title>
-          <Space size="middle">
+          <div style={{ minWidth: 0, lineHeight: 1.2 }}>
+            <Title level={3} style={{ color: 'white', margin: 0, lineHeight: 1.2 }}>
+              {t('appTitle')}
+            </Title>
+            <span style={{ color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: 400 }}>
+              {t('appSubtitle')}
+            </span>
+          </div>
+          <Space size="middle" style={{ flexShrink: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Tag color={backendStatus.connected === null ? 'default' : backendStatus.connected ? 'green' : 'red'}>
                 {backendStatus.connected === null
-                  ? 'Checking...'
+                  ? t('appChecking')
                   : backendStatus.connected
-                    ? 'Backend Connected'
-                    : 'Backend Disconnected'}
+                    ? t('appBackendConnected')
+                    : t('appBackendDisconnected')}
               </Tag>
               <span style={{ color: '#fff', fontSize: 12 }}>
-                Latency: {backendStatus.connected ? `${backendStatus.latencyMs ?? '-'} ms` : '-'}
+                {t('appLatency')}: {backendStatus.connected ? `${backendStatus.latencyMs ?? '-'} ms` : '-'}
               </span>
             </div>
             <LanguageSwitcher />
-            <Button danger disabled={!hasRunningJob} onClick={handleStopRunning}>
-              Stop Current Job
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={isStarting}
+              disabled={isActiveSectionRunning}
+              onClick={handleStartCurrent}
+              style={{
+                fontWeight: 700,
+                borderWidth: 1,
+                borderColor: '#95de64',
+                background: isActiveSectionRunning
+                  ? '#8c8c8c'
+                  : 'linear-gradient(135deg, #52c41a 0%, #389e0d 100%)',
+                color: '#fff',
+                boxShadow: isStarting
+                  ? '0 0 0 3px rgba(82,196,26,0.35)'
+                  : '0 2px 6px rgba(0,0,0,0.22)',
+              }}
+            >
+              {startButtonText}
+            </Button>
+            <Button
+              danger
+              type={hasRunningJob ? 'primary' : 'default'}
+              icon={<StopOutlined />}
+              loading={isStopping}
+              disabled={!hasRunningJob}
+              onClick={handleStopRunning}
+              style={{
+                fontWeight: 700,
+                borderWidth: 1,
+                background: hasRunningJob
+                  ? 'linear-gradient(135deg, #ff4d4f 0%, #cf1322 100%)'
+                  : undefined,
+                color: hasRunningJob ? '#fff' : undefined,
+                boxShadow: hasRunningJob
+                  ? '0 0 0 3px rgba(255,77,79,0.28)'
+                  : 'none',
+              }}
+            >
+              {isStopping
+                ? (language === 'zh' ? '停止中...' : 'Stopping...')
+                : t('appStopCurrentJob')}
             </Button>
           </Space>
         </div>

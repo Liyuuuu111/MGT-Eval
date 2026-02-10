@@ -3,7 +3,8 @@
  */
 
 import React, { useEffect, useState, useMemo } from 'react';
-import { Card, Row, Col, Form, Button, Select, message, Divider, Typography } from 'antd';
+import { Card, Row, Col, Form, Button, Select, message, Divider, Space, Tag, Typography } from 'antd';
+import { FileTextOutlined, TeamOutlined, TrophyOutlined, LinkOutlined } from '@ant-design/icons';
 import { useStore } from '../../store';
 import { LogViewer } from '../Shared/LogViewer';
 import { GPUSelector } from '../Shared/GPUSelector';
@@ -15,8 +16,18 @@ import { HFMirrorSuggestion } from '../Shared/HFMirrorSuggestion';
 import { FieldHelpText } from '../Shared/FieldHelpText';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useUILanguage } from '../../hooks/useUILanguage';
+import { getCoreText } from '../../i18n/coreText';
 import api from '../../services/api';
-import { DETECTOR_INFO, DetectorInfo, formatDetectorLabel, mergeDetectorInfo } from '../Detect/detectorInfo';
+import {
+  DETECTOR_INFO,
+  DetectorInfo,
+  formatDetectorLabel,
+  formatDetectorVenue,
+  getDetectorVenueTagColor,
+  hasDetectorVenue,
+  mergeDetectorInfo,
+} from '../Detect/detectorInfo';
+import { START_SECTION_EVENT, StartSectionEventDetail } from '../../constants/jobControls';
 
 // Helper function to split config keys for balanced layout
 const splitConfigKeys = (config: any, mainKeys: string[]): { leftKeys: string[], rightKeys: string[] } => {
@@ -65,6 +76,24 @@ export const TrainSection: React.FC = () => {
   } = useStore();
 
   useWebSocket({ jobId: trainJobId, section: 'train', isRunning: isTrainRunning });
+
+  useEffect(() => {
+    const handleStartRequest = (event: Event) => {
+      const detail = (event as CustomEvent<StartSectionEventDetail>).detail;
+      if (detail?.section !== 'train') {
+        return;
+      }
+      if (isTrainRunning || loading) {
+        return;
+      }
+      form.submit();
+    };
+
+    window.addEventListener(START_SECTION_EVENT, handleStartRequest as EventListener);
+    return () => {
+      window.removeEventListener(START_SECTION_EVENT, handleStartRequest as EventListener);
+    };
+  }, [form, isTrainRunning, loading]);
 
   // Dynamically split config keys for balanced layout
   const { leftKeys, rightKeys } = useMemo(() => {
@@ -204,8 +233,28 @@ export const TrainSection: React.FC = () => {
                 disabled={isTrainRunning}
               >
                 {detectors.map((d) => (
-                  <Select.Option key={d} value={d}>
-                    {formatDetectorLabel(d, detectorInfoMap)}
+                  <Select.Option key={d} value={d} label={formatDetectorLabel(d, detectorInfoMap)}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {formatDetectorLabel(d, detectorInfoMap)}
+                      </span>
+                      {hasDetectorVenue(d, detectorInfoMap) && (
+                        <Tag
+                          color={getDetectorVenueTagColor(d, detectorInfoMap)}
+                          style={{
+                            margin: 0,
+                            borderRadius: 999,
+                            fontSize: 12,
+                            lineHeight: '18px',
+                            paddingInline: 9,
+                            fontWeight: 600,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {formatDetectorVenue(d, detectorInfoMap)}
+                        </Tag>
+                      )}
+                    </div>
                   </Select.Option>
                 ))}
               </Select>
@@ -214,31 +263,53 @@ export const TrainSection: React.FC = () => {
             {selectedDetector && templateConfig && (
               <>
                 {detectorInfo && (
-                  <Card size="small" style={{ marginBottom: 16, background: '#f0f7ff', border: '1px solid #91d5ff' }}>
-                    <Typography.Title level={5} style={{ marginBottom: 8, color: '#1890ff' }}>
-                      {detectorInfo.name}
-                    </Typography.Title>
-                    <Typography.Paragraph style={{ marginBottom: 0, color: '#595959' }}>
-                      {detectorInfo.description}
-                    </Typography.Paragraph>
-                    {detectorInfo.paper && (
-                      <Typography.Paragraph style={{ marginBottom: 0, marginTop: 8, color: '#595959' }}>
-                        <strong>Paper:</strong> {detectorInfo.paper}
-                      </Typography.Paragraph>
-                    )}
-                    {detectorInfo.authors && (
-                      <Typography.Paragraph style={{ marginBottom: 0, color: '#595959' }}>
-                        <strong>Authors:</strong> {detectorInfo.authors}
-                      </Typography.Paragraph>
-                    )}
-                    {detectorInfo.link && detectorInfo.link !== 'N/A' && (
-                      <Typography.Paragraph style={{ marginBottom: 0, color: '#595959' }}>
-                        <strong>Link:</strong>{' '}
-                        <a href={detectorInfo.link} target="_blank" rel="noreferrer">
-                          {detectorInfo.link}
-                        </a>
-                      </Typography.Paragraph>
-                    )}
+                  <Card
+                    size="small"
+                    style={{
+                      marginBottom: 16,
+                      borderRadius: 12,
+                      background: 'linear-gradient(135deg, #f5f0ff 0%, #e8f4fd 100%)',
+                      border: '1px solid #d3adf7',
+                      boxShadow: '0 2px 8px rgba(114, 46, 209, 0.08)',
+                    }}
+                  >
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      <Typography.Title level={5} style={{ margin: 0, color: '#5b21b6' }}>
+                        {detectorInfo.name}
+                      </Typography.Title>
+                      <Typography.Text style={{ color: '#595959', fontSize: 13 }}>
+                        {detectorInfo.description}
+                      </Typography.Text>
+                      <Divider style={{ margin: '8px 0' }} />
+                      {detectorInfo.paper && (
+                        <Typography.Text style={{ fontSize: 13, color: '#595959' }}>
+                          <FileTextOutlined style={{ marginRight: 6, color: '#7c3aed' }} />
+                          <strong>{getCoreText(language, 'detectPaper')}:</strong> {detectorInfo.paper}
+                        </Typography.Text>
+                      )}
+                      {detectorInfo.authors && (
+                        <Typography.Text style={{ fontSize: 13, color: '#595959' }}>
+                          <TeamOutlined style={{ marginRight: 6, color: '#7c3aed' }} />
+                          <strong>{getCoreText(language, 'detectAuthors')}:</strong> {detectorInfo.authors}
+                        </Typography.Text>
+                      )}
+                      {detectorInfo.venue && (
+                        <div>
+                          <TrophyOutlined style={{ marginRight: 6, color: '#7c3aed' }} />
+                          <strong style={{ fontSize: 13 }}>{getCoreText(language, 'detectVenue')}:</strong>{' '}
+                          <Tag color="purple" style={{ fontSize: 12 }}>{detectorInfo.venue}</Tag>
+                        </div>
+                      )}
+                      {detectorInfo.link && detectorInfo.link !== 'N/A' && (
+                        <div>
+                          <LinkOutlined style={{ marginRight: 6, color: '#7c3aed' }} />
+                          <strong style={{ fontSize: 13 }}>{getCoreText(language, 'detectLink')}:</strong>{' '}
+                          <Typography.Link href={detectorInfo.link} target="_blank" style={{ fontSize: 13 }}>
+                            {detectorInfo.link}
+                          </Typography.Link>
+                        </div>
+                      )}
+                    </Space>
                   </Card>
                 )}
                 <Divider orientation="left">System Resources</Divider>

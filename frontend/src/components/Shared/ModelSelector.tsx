@@ -2,7 +2,7 @@
  * Local Model Selector Component
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Select, Alert, Spin, Tag, Input } from 'antd';
 import { RobotOutlined, ReloadOutlined } from '@ant-design/icons';
 import api from '../../services/api';
@@ -18,13 +18,17 @@ interface ModelSelectorProps {
   onChange?: (value: string) => void;
   placeholder?: string;
   allowManual?: boolean;
+  presetOptions?: string[];
+  presetLabel?: string;
 }
 
 export const ModelSelector: React.FC<ModelSelectorProps> = ({
   value,
   onChange,
   placeholder = "Select a local model or enter model name",
-  allowManual = true
+  allowManual = true,
+  presetOptions = [],
+  presetLabel = 'Backbone Presets',
 }) => {
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,6 +36,25 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   const [manualInput, setManualInput] = useState(false);
   const marqueeThreshold = 26;
   const marqueeDurationSec = 10;
+  const normalizedPresetOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          presetOptions
+            .map((item) => String(item || '').trim())
+            .filter(Boolean),
+        ),
+      ),
+    [presetOptions],
+  );
+  const localModelNameSet = useMemo(
+    () => new Set(models.map((m) => m.name.toLowerCase())),
+    [models],
+  );
+  const displayPresetOptions = useMemo(
+    () => normalizedPresetOptions.filter((item) => !localModelNameSet.has(item.toLowerCase())),
+    [normalizedPresetOptions, localModelNameSet],
+  );
 
   useEffect(() => {
     loadModels();
@@ -73,7 +96,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
     );
   }
 
-  if (manualInput || models.length === 0) {
+  if (manualInput || (models.length === 0 && displayPresetOptions.length === 0)) {
     return (
       <div>
         <style>
@@ -113,14 +136,14 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           placeholder={placeholder}
           prefix={<RobotOutlined />}
         />
-        {models.length > 0 && (
+        {(models.length > 0 || displayPresetOptions.length > 0) && (
           <div style={{ marginTop: 4 }}>
             <a onClick={() => setManualInput(false)} style={{ fontSize: '12px' }}>
-              ← Back to local models
+              ← Back to model options
             </a>
           </div>
         )}
-        {models.length === 0 && (
+        {models.length === 0 && displayPresetOptions.length === 0 && (
           <Alert
             type="info"
             message="No Local Models Found"
@@ -193,7 +216,42 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           </>
         )}
       >
-        {models.map((model) => (
+        {displayPresetOptions.length > 0 && (
+          <Select.OptGroup key="preset-models" label={presetLabel}>
+            {displayPresetOptions.map((preset) => (
+              <Select.Option key={`preset:${preset}`} value={preset} label={preset}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span><RobotOutlined /> {preset}</span>
+                  <Tag color="purple" style={{ margin: 0 }}>Preset</Tag>
+                </div>
+              </Select.Option>
+            ))}
+          </Select.OptGroup>
+        )}
+        {models.length > 0 && displayPresetOptions.length > 0 && (
+          <Select.OptGroup key="local-models" label="Local Models">
+            {models.map((model) => (
+              <Select.Option key={model.name} value={model.name} label={model.name}>
+                <div className="model-option-row">
+                  <div className="model-name-wrap" title={model.name}>
+                    {model.name.length > marqueeThreshold ? (
+                      <div className="model-name-scroll">
+                        <span><RobotOutlined /> {model.name}</span>
+                        <span><RobotOutlined /> {model.name}</span>
+                      </div>
+                    ) : (
+                      <span className="model-name-text"><RobotOutlined /> {model.name}</span>
+                    )}
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <Tag color="blue" style={{ margin: 0 }}>{model.size}</Tag>
+                  </div>
+                </div>
+              </Select.Option>
+            ))}
+          </Select.OptGroup>
+        )}
+        {models.length > 0 && displayPresetOptions.length === 0 && models.map((model) => (
           <Select.Option key={model.name} value={model.name} label={model.name}>
             <div className="model-option-row">
               <div className="model-name-wrap" title={model.name}>
@@ -214,7 +272,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         ))}
       </Select>
       <div style={{ marginTop: 8, fontSize: '12px', color: '#666' }}>
-        💡 Found {models.length} local model(s) in cache
+        {displayPresetOptions.length > 0
+          ? `💡 Found ${displayPresetOptions.length} preset backbone option(s), ${models.length} local model(s)`
+          : `💡 Found ${models.length} local model(s) in cache`}
       </div>
     </div>
   );

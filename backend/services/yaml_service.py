@@ -64,7 +64,32 @@ class YAMLService:
             raise FileNotFoundError(f"Template not found: {path}")
 
         with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+            template = yaml.safe_load(f) or {}
+
+        return self._inject_runtime_defaults(section, template)
+
+    def _inject_runtime_defaults(self, section: str, template: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Inject runtime-aware defaults for frontend templates.
+
+        Current behavior:
+        - For build/attack templates, prefill vLLM tensor parallel size with the
+          number of visible GPUs (fallback to 1 when unavailable).
+        """
+        if not isinstance(template, dict):
+            return template
+
+        if section in {"build", "attack"} and "vllm_tensor_parallel_size" in template:
+            gpu_count = 0
+            try:
+                from backend.services.system_service import SystemService
+                gpu_count = len(SystemService().detect_gpus())
+            except Exception:
+                gpu_count = 0
+
+            template["vllm_tensor_parallel_size"] = max(1, int(gpu_count or 0))
+
+        return template
 
     def load_attacks_json(self) -> Dict[str, Any]:
         """Load all attack types from attacks_all.json"""
@@ -123,6 +148,30 @@ class YAMLService:
             backend = config.get("backend", "hf")
             if backend not in ["hf", "api"]:
                 errors.append(f"Invalid backend: {backend}. Must be 'hf' or 'api'")
+
+            # Optional dataset split validation
+            enable_split_raw = config.get("enable_dataset_split", False)
+            enable_split = bool(enable_split_raw)
+            if isinstance(enable_split_raw, str):
+                enable_split = enable_split_raw.strip().lower() in {"1", "true", "yes", "on"}
+
+            ratio_keys = ["split_train_ratio", "split_dev_ratio", "split_test_ratio"]
+            ratios: Dict[str, int] = {}
+            for key in ratio_keys:
+                raw = config.get(key, 0)
+                try:
+                    val = int(raw)
+                except Exception:
+                    errors.append(f"Field '{key}' must be an integer")
+                    continue
+                if val < 0 or val > 10:
+                    errors.append(f"Field '{key}' must be in range [0, 10]")
+                    continue
+                ratios[key] = val
+
+            if enable_split and len(ratios) == 3:
+                if (ratios["split_train_ratio"] + ratios["split_dev_ratio"] + ratios["split_test_ratio"]) <= 0:
+                    errors.append("When 'enable_dataset_split' is enabled, at least one split ratio must be > 0")
 
         elif section == "attack":
             if not config.get("data"):

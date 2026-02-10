@@ -310,6 +310,12 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="(attack-only) randomly sample K eligible examples to attack; default: full. Controlled by --seed.",
     )
+
+    # optional dataset split (build output post-processing)
+    ap.add_argument("--enable_dataset_split", type=int, default=0, help="1: split out file to train/dev/test")
+    ap.add_argument("--split_train_ratio", type=int, default=8, help="train split ratio in [0,10]")
+    ap.add_argument("--split_dev_ratio", type=int, default=1, help="dev split ratio in [0,10]")
+    ap.add_argument("--split_test_ratio", type=int, default=1, help="test split ratio in [0,10]")
     return ap
 
 
@@ -518,6 +524,10 @@ def main():
         machine_label=int(args.machine_label),
         sample_k=sample_k,  # ✅ NEW（：）
         gen_batch_size=int(getattr(args, "gen_batch_size", 1) or 1),
+        enable_dataset_split=bool(int(getattr(args, "enable_dataset_split", 0) or 0)),
+        split_train_ratio=int(getattr(args, "split_train_ratio", 8) or 0),
+        split_dev_ratio=int(getattr(args, "split_dev_ratio", 1) or 0),
+        split_test_ratio=int(getattr(args, "split_test_ratio", 1) or 0),
     )
 
     # -------- backend: ONLY when NOT attack-only --------

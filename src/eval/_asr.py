@@ -91,21 +91,86 @@ def _match_key(e: Dict[str, Any]) -> Optional[str]:
 
 
 def _summarize_asr_attacks(attacks_out: Dict[str, Any]) -> Dict[str, Any]:
+    def _to_float(v: Any) -> Optional[float]:
+        try:
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _to_nonneg_int(v: Any) -> Optional[int]:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, int):
+            return max(0, int(v))
+        try:
+            if v is None:
+                return None
+            iv = int(v)
+            return max(0, iv)
+        except Exception:
+            return None
+
+    def _weight_of(rec: Dict[str, Any]) -> int:
+        w = _to_nonneg_int(rec.get("attack_eval_n"))
+        if w is None:
+            w = _to_nonneg_int(rec.get("base_correct_n"))
+        return int(w or 0)
+
+    def _weight_from_methods(by_method: Dict[str, Any]) -> int:
+        total = 0
+        for mrec in by_method.values():
+            if isinstance(mrec, dict):
+                total += _weight_of(mrec)
+        return int(total)
+
+    def _extract_point(rec: Dict[str, Any]) -> Optional[Tuple[float, int]]:
+        # direct ASR record
+        direct_asr = _to_float(rec.get("asr"))
+        if direct_asr is not None:
+            return direct_asr, _weight_of(rec)
+
+        # nested summary (e.g., paired/by-method attack container)
+        summ = rec.get("summary")
+        if isinstance(summ, dict):
+            nested_asr = _to_float(summ.get("asr_weighted_mean"))
+            if nested_asr is None:
+                nested_asr = _to_float(summ.get("asr_mean"))
+            if nested_asr is not None:
+                w = 0
+                by_method = rec.get("by_method")
+                if isinstance(by_method, dict) and by_method:
+                    w = _weight_from_methods(by_method)
+                if w <= 0:
+                    w = int(_to_nonneg_int(summ.get("n_valid_asr")) or 0)
+                return nested_asr, w
+
+        # nested by_method without summary: summarize once as fallback
+        by_method = rec.get("by_method")
+        if isinstance(by_method, dict) and by_method:
+            nested = _summarize_asr_attacks(by_method)
+            nested_asr = _to_float(nested.get("asr_weighted_mean"))
+            if nested_asr is None:
+                nested_asr = _to_float(nested.get("asr_mean"))
+            if nested_asr is not None:
+                w = _weight_from_methods(by_method)
+                if w <= 0:
+                    w = int(_to_nonneg_int(nested.get("n_valid_asr")) or 0)
+                return nested_asr, w
+
+        return None
+
     vals: List[float] = []
     wts: List[int] = []
     for _, rec in (attacks_out or {}).items():
-        a = rec.get("asr", None)
-        if a is None:
+        if not isinstance(rec, dict):
             continue
-        try:
-            af = float(a)
-        except Exception:
+        point = _extract_point(rec)
+        if point is None:
             continue
+        af, w = point
         vals.append(af)
-
-        w = rec.get("attack_eval_n", None)
-        if not isinstance(w, int):
-            w = rec.get("base_correct_n", 0)
         wts.append(max(0, int(w)))
 
     asr_mean = (sum(vals) / len(vals)) if vals else None

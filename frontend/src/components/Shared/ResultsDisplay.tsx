@@ -3,16 +3,27 @@
  * Displays training and detection results
  */
 
-import React from 'react';
-import { Card, Descriptions, Statistic, Row, Col, Table, Tag, Space } from 'antd';
+import React, { useMemo } from 'react';
+import { Card, Descriptions, Statistic, Row, Col, Table, Tag, Space, Typography } from 'antd';
 import { CheckCircleOutlined } from '@ant-design/icons';
+import { useUILanguage } from '../../hooks/useUILanguage';
 
 interface ResultsDisplayProps {
   results: any;
   type: 'train' | 'detect';
 }
 
+const formatPercent = (value: any) => `${(Number(value) * 100).toFixed(2)}`;
+
+const asNumber = (value: any): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  return null;
+};
+
 export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type }) => {
+  const { t } = useUILanguage();
   if (!results) {
     return null;
   }
@@ -49,12 +60,44 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
     ? results.predictions_preview.slice(0, 8)
     : [];
 
+  const asrPayload = type === 'detect' ? evalSummary?.asr : null;
+  const asrSummary = asrPayload?.summary || {};
+  const asrDefinition = asrPayload?.definition;
+  const asrAttacks = (asrPayload && typeof asrPayload.attacks === 'object')
+    ? asrPayload.attacks
+    : {};
+
+  const asrRows = useMemo(() => {
+    if (!asrAttacks || typeof asrAttacks !== 'object') {
+      return [];
+    }
+    return Object.entries(asrAttacks).map(([attackKey, rec]: [string, any]) => {
+      const row = rec || {};
+      const rowAsr = asNumber(row.asr) ?? asNumber(row?.summary?.asr_mean);
+      const rowAttackAcc = asNumber(row.attack_acc);
+      const rowAttackEvalN = typeof row.attack_eval_n === 'number' ? row.attack_eval_n : null;
+      const rowBaseCorrectN = typeof row.base_correct_n === 'number' ? row.base_correct_n : null;
+      const rowMatchMode = typeof row.match_mode === 'string' ? row.match_mode : '-';
+      return {
+        key: attackKey,
+        attack: attackKey,
+        asr: rowAsr,
+        attack_acc: rowAttackAcc,
+        attack_eval_n: rowAttackEvalN,
+        base_correct_n: rowBaseCorrectN,
+        match_mode: rowMatchMode,
+      };
+    });
+  }, [asrAttacks]);
+
+  const hasAsr = Boolean(asrPayload && (asrRows.length > 0 || asrSummary));
+
   return (
     <Card
       title={
         <Space>
           <CheckCircleOutlined style={{ color: '#52c41a' }} />
-          <span>{type === 'train' ? 'Training Results' : 'Detection Results'}</span>
+          <span>{type === 'train' ? t('resultsTrainingTitle') : t('resultsDetectionTitle')}</span>
         </Space>
       }
       style={{
@@ -65,65 +108,63 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
         boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
       }}
     >
-      {/* Performance Metrics */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
         {accuracy !== undefined && accuracy !== null && (
           <Col span={6}>
             <Statistic
-              title="Accuracy"
+              title={t('resultsAccuracy')}
               value={accuracy}
               precision={4}
               valueStyle={{ color: '#3f8600' }}
               suffix="%"
-              formatter={(value) => `${(Number(value) * 100).toFixed(2)}`}
+              formatter={(value) => formatPercent(value)}
             />
           </Col>
         )}
         {precision !== undefined && precision !== null && (
           <Col span={6}>
             <Statistic
-              title="Precision"
+              title={t('resultsPrecision')}
               value={precision}
               precision={4}
               valueStyle={{ color: '#1890ff' }}
               suffix="%"
-              formatter={(value) => `${(Number(value) * 100).toFixed(2)}`}
+              formatter={(value) => formatPercent(value)}
             />
           </Col>
         )}
         {recall !== undefined && recall !== null && (
           <Col span={6}>
             <Statistic
-              title="Recall"
+              title={t('resultsRecall')}
               value={recall}
               precision={4}
               valueStyle={{ color: '#fa8c16' }}
               suffix="%"
-              formatter={(value) => `${(Number(value) * 100).toFixed(2)}`}
+              formatter={(value) => formatPercent(value)}
             />
           </Col>
         )}
         {f1 !== undefined && f1 !== null && (
           <Col span={6}>
             <Statistic
-              title="F1 Score"
+              title={t('resultsF1')}
               value={f1}
               precision={4}
-              valueStyle={{ color: '#722ed1' }}
+              valueStyle={{ color: '#7c3aed' }}
               suffix="%"
-              formatter={(value) => `${(Number(value) * 100).toFixed(2)}`}
+              formatter={(value) => formatPercent(value)}
             />
           </Col>
         )}
       </Row>
 
-      {/* AUROC and AUPR */}
       {(auroc || aupr) && (
         <Row gutter={16} style={{ marginBottom: 16 }}>
           {auroc && (
             <Col span={12}>
               <Statistic
-                title="AUROC"
+                title={t('resultsAuroc')}
                 value={auroc}
                 precision={4}
                 valueStyle={{ color: '#13c2c2' }}
@@ -133,7 +174,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
           {aupr && (
             <Col span={12}>
               <Statistic
-                title="AUPR"
+                title={t('resultsAupr')}
                 value={aupr}
                 precision={4}
                 valueStyle={{ color: '#eb2f96' }}
@@ -143,40 +184,134 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
         </Row>
       )}
 
-      {/* Train-specific highlights */}
       {type === 'train' && (
         <Row gutter={16} style={{ marginBottom: 16 }}>
           {trainMetrics?.best_val_acc !== undefined && (
             <Col span={12}>
               <Statistic
-                title="Best Val Acc"
+                title={t('resultsBestValAcc')}
                 value={trainMetrics.best_val_acc}
                 precision={4}
                 valueStyle={{ color: '#2f54eb' }}
                 suffix="%"
-                formatter={(value) => `${(Number(value) * 100).toFixed(2)}`}
+                formatter={(value) => formatPercent(value)}
               />
             </Col>
           )}
           {trainMetrics?.test_acc !== undefined && (
             <Col span={12}>
               <Statistic
-                title="Train Test Acc"
+                title={t('resultsTrainTestAcc')}
                 value={trainMetrics.test_acc}
                 precision={4}
                 valueStyle={{ color: '#08979c' }}
                 suffix="%"
-                formatter={(value) => `${(Number(value) * 100).toFixed(2)}`}
+                formatter={(value) => formatPercent(value)}
               />
             </Col>
           )}
         </Row>
       )}
 
-      {/* Confusion Matrix */}
+      {hasAsr && (
+        <Card title={t('resultsAsrOverview')} size="small" style={{ marginTop: 16, background: '#fff' }}>
+          <Row gutter={16} style={{ marginBottom: 12 }}>
+            {asNumber(asrSummary?.asr_mean) !== null && (
+              <Col span={6}>
+                <Statistic
+                  title={t('resultsAsrMean')}
+                  value={asNumber(asrSummary?.asr_mean) || 0}
+                  precision={4}
+                  valueStyle={{ color: '#cf1322' }}
+                  suffix="%"
+                  formatter={(value) => formatPercent(value)}
+                />
+              </Col>
+            )}
+            {asNumber(asrSummary?.asr_weighted_mean) !== null && (
+              <Col span={6}>
+                <Statistic
+                  title={t('resultsAsrWeightedMean')}
+                  value={asNumber(asrSummary?.asr_weighted_mean) || 0}
+                  precision={4}
+                  valueStyle={{ color: '#d4380d' }}
+                  suffix="%"
+                  formatter={(value) => formatPercent(value)}
+                />
+              </Col>
+            )}
+            {typeof asrSummary?.n_attacks === 'number' && (
+              <Col span={6}>
+                <Statistic title={t('resultsAsrAttackCount')} value={asrSummary.n_attacks} />
+              </Col>
+            )}
+            {typeof asrSummary?.n_valid_asr === 'number' && (
+              <Col span={6}>
+                <Statistic title={t('resultsAsrValidCount')} value={asrSummary.n_valid_asr} />
+              </Col>
+            )}
+          </Row>
+          {typeof asrDefinition === 'string' && asrDefinition && (
+            <Typography.Text type="secondary">
+              {t('resultsAsrDefinition')}: {asrDefinition}
+            </Typography.Text>
+          )}
+
+          {asrRows.length > 0 && (
+            <Table
+              style={{ marginTop: 12 }}
+              dataSource={asrRows}
+              columns={[
+                { title: t('resultsAsrByAttack'), dataIndex: 'attack', key: 'attack' },
+                {
+                  title: t('resultsAsr'),
+                  dataIndex: 'asr',
+                  key: 'asr',
+                  width: 120,
+                  render: (value: any) => (
+                    typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '-'
+                  ),
+                },
+                {
+                  title: t('resultsAttackAcc'),
+                  dataIndex: 'attack_acc',
+                  key: 'attack_acc',
+                  width: 120,
+                  render: (value: any) => (
+                    typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '-'
+                  ),
+                },
+                {
+                  title: t('resultsAttackEvalN'),
+                  dataIndex: 'attack_eval_n',
+                  key: 'attack_eval_n',
+                  width: 120,
+                  render: (value: any) => (typeof value === 'number' ? value : '-'),
+                },
+                {
+                  title: t('resultsBaseCorrectN'),
+                  dataIndex: 'base_correct_n',
+                  key: 'base_correct_n',
+                  width: 120,
+                  render: (value: any) => (typeof value === 'number' ? value : '-'),
+                },
+                {
+                  title: t('resultsMatchMode'),
+                  dataIndex: 'match_mode',
+                  key: 'match_mode',
+                  width: 140,
+                },
+              ]}
+              pagination={false}
+              size="small"
+            />
+          )}
+        </Card>
+      )}
+
       {confusion && (
         <Card
-          title="Confusion Matrix"
+          title={t('resultsConfusionMatrix')}
           size="small"
           style={{ marginTop: 16, background: '#fff' }}
         >
@@ -184,33 +319,33 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
             dataSource={[
               {
                 key: 'positive',
-                actual: 'Positive',
+                actual: t('resultsPositive'),
                 predictedPositive: confusion.tp,
                 predictedNegative: confusion.fn,
               },
               {
                 key: 'negative',
-                actual: 'Negative',
+                actual: t('resultsNegative'),
                 predictedPositive: confusion.fp,
                 predictedNegative: confusion.tn,
               },
             ]}
             columns={[
               {
-                title: 'Actual / Predicted',
+                title: t('resultsActualPredicted'),
                 dataIndex: 'actual',
                 key: 'actual',
                 width: 150,
               },
               {
-                title: 'Positive',
+                title: t('resultsPositive'),
                 dataIndex: 'predictedPositive',
                 key: 'predictedPositive',
                 align: 'center',
                 render: (value) => <Tag color="green">{value}</Tag>,
               },
               {
-                title: 'Negative',
+                title: t('resultsNegative'),
                 dataIndex: 'predictedNegative',
                 key: 'predictedNegative',
                 align: 'center',
@@ -224,7 +359,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
       )}
 
       {predictionsPreview.length > 0 && (
-        <Card title="Prediction Preview" size="small" style={{ marginTop: 16, background: '#fff' }}>
+        <Card title={t('resultsPredictionPreview')} size="small" style={{ marginTop: 16, background: '#fff' }}>
           <Table
             dataSource={predictionsPreview.map((row: any, idx: number) => ({
               key: String(row.id ?? idx),
@@ -234,24 +369,24 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
             }))}
             columns={[
               {
-                title: 'Text',
+                title: t('resultsText'),
                 dataIndex: 'text',
                 key: 'text',
-                render: (value: string) => value || '(empty)',
+                render: (value: string) => value || t('resultsEmptyText'),
               },
               {
-                title: 'Pred',
+                title: t('resultsPred'),
                 dataIndex: 'pred',
                 key: 'pred',
                 width: 90,
                 render: (value: any) => (
                   <Tag color={Number(value) === 1 ? 'red' : 'green'}>
-                    {Number(value) === 1 ? 'Machine' : 'Human'}
+                    {Number(value) === 1 ? t('resultsMachine') : t('resultsHuman')}
                   </Tag>
                 ),
               },
               {
-                title: 'Prob',
+                title: t('resultsProb'),
                 dataIndex: 'prob',
                 key: 'prob',
                 width: 120,
@@ -266,25 +401,24 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ results, type })
         </Card>
       )}
 
-      {/* Additional Info */}
       {(evalSummary?.meta || results?.manifest) && (
         <Descriptions
-          title="Detector Information"
+          title={t('resultsDetectorInformation')}
           bordered
           size="small"
           style={{ marginTop: 16 }}
         >
           {evalSummary?.detector && (
-            <Descriptions.Item label="Detector">{evalSummary.detector}</Descriptions.Item>
+            <Descriptions.Item label={t('resultsDetector')}>{evalSummary.detector}</Descriptions.Item>
           )}
           {evalSummary?.meta?.detector_type && (
-            <Descriptions.Item label="Type">{evalSummary.meta.detector_type}</Descriptions.Item>
+            <Descriptions.Item label={t('resultsType')}>{evalSummary.meta.detector_type}</Descriptions.Item>
           )}
           {evalSummary?.meta?.dev?.num_samples && (
-            <Descriptions.Item label="Samples">{evalSummary.meta.dev.num_samples}</Descriptions.Item>
+            <Descriptions.Item label={t('resultsSamples')}>{evalSummary.meta.dev.num_samples}</Descriptions.Item>
           )}
           {results?.manifest?.timing?.evaluate_sec && (
-            <Descriptions.Item label="Eval Time (s)">
+            <Descriptions.Item label={t('resultsEvalTimeSec')}>
               {Number(results.manifest.timing.evaluate_sec).toFixed(3)}
             </Descriptions.Item>
           )}

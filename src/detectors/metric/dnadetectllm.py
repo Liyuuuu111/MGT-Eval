@@ -2,7 +2,7 @@
 # mgt_eval/detectors/metric/dna_detectllm.py
 
 from __future__ import annotations
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 import os
 import random
 
@@ -48,6 +48,30 @@ def assert_tokenizer_consistency(model_id_1: str, model_id_2: str):
             f"Tokenizers are not identical for {model_id_1} and {model_id_2}."
         )
     return True
+
+
+def _extract_model_context_limit(config) -> Optional[int]:
+    """
+    Best-effort context-length extraction across model families.
+    """
+    candidates = []
+    for key in (
+        "max_position_embeddings",
+        "n_positions",
+        "max_seq_len",
+        "seq_length",
+        "max_sequence_length",
+        "model_max_length",
+    ):
+        value = getattr(config, key, None)
+        if isinstance(value, int) and value > 0:
+            # Skip placeholder "infinite" values used by some tokenizers/configs.
+            if value >= 1_000_000:
+                continue
+            candidates.append(value)
+    if not candidates:
+        return None
+    return min(candidates)
 
 
 # ---------------------------------------------------------
@@ -334,7 +358,29 @@ class DetectLLM(object):
         self.tokenizer = AutoTokenizer.from_pretrained(observer_name_or_path)
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.max_token_observed = max_token_observed
+        self.max_token_observed = int(max_token_observed)
+
+        self._observer_vocab_size = int(self.observer_model.get_input_embeddings().num_embeddings)
+        self._performer_vocab_size = int(self.performer_model.get_input_embeddings().num_embeddings)
+        self._warned_vocab_clip = False
+
+        observer_ctx = _extract_model_context_limit(self.observer_model.config)
+        performer_ctx = _extract_model_context_limit(self.performer_model.config)
+        tokenizer_ctx = getattr(self.tokenizer, "model_max_length", None)
+        candidates = [self.max_token_observed]
+        if isinstance(observer_ctx, int) and observer_ctx > 0:
+            candidates.append(observer_ctx)
+        if isinstance(performer_ctx, int) and performer_ctx > 0:
+            candidates.append(performer_ctx)
+        if isinstance(tokenizer_ctx, int) and 0 < tokenizer_ctx < 1_000_000:
+            candidates.append(tokenizer_ctx)
+        self.effective_max_token_observed = int(min(candidates))
+        if self.effective_max_token_observed < self.max_token_observed:
+            print(
+                "[DNA-DetectLLM] Reduce max_token_observed "
+                f"from {self.max_token_observed} to {self.effective_max_token_observed} "
+                "to fit model/tokenizer context limits."
+            )
 
     # ——  mode / threshold  ——
     def change_mode(self, mode: str) -> None:
@@ -352,18 +398,66 @@ class DetectLLM(object):
             return_tensors="pt",
             padding="longest" if batch_size > 1 else False,
             truncation=True,
-            max_length=self.max_token_observed,
+            max_length=self.effective_max_token_observed,
             return_token_type_ids=False,
-        ).to(self.observer_model.device)
+        )
         return encodings
+
+    def _safe_token_id(self, vocab_size: int) -> int:
+        for candidate in (
+            self.tokenizer.eos_token_id,
+            self.tokenizer.pad_token_id,
+            self.tokenizer.unk_token_id,
+            0,
+        ):
+            if isinstance(candidate, int) and 0 <= candidate < vocab_size:
+                return int(candidate)
+        return max(vocab_size - 1, 0)
+
+    def _prepare_inputs_for_model(
+        self,
+        encodings: transformers.BatchEncoding,
+        device: str,
+        vocab_size: int,
+        model_name: str,
+    ) -> transformers.BatchEncoding:
+        payload: Dict[str, torch.Tensor] = {}
+        for key, tensor in encodings.items():
+            payload[key] = tensor.to(device)
+
+        input_ids = payload.get("input_ids")
+        if input_ids is not None:
+            invalid_mask = (input_ids < 0) | (input_ids >= vocab_size)
+            if bool(invalid_mask.any()):
+                safe_id = self._safe_token_id(vocab_size)
+                payload["input_ids"] = torch.where(
+                    invalid_mask,
+                    torch.full_like(input_ids, safe_id),
+                    input_ids,
+                )
+                if not self._warned_vocab_clip:
+                    invalid_count = int(invalid_mask.sum().item())
+                    print(
+                        "[DNA-DetectLLM] Found "
+                        f"{invalid_count} token ids out of range for {model_name} "
+                        f"(vocab_size={vocab_size}); replaced with token_id={safe_id}."
+                    )
+                    self._warned_vocab_clip = True
+        return transformers.BatchEncoding(payload)
 
     @torch.inference_mode()
     def _get_logits(self, encodings: transformers.BatchEncoding):
-        observer_logits = self.observer_model(**encodings.to(DEVICE_1)).logits
-        performer_logits = self.performer_model(**encodings.to(DEVICE_2)).logits
+        observer_encodings = self._prepare_inputs_for_model(
+            encodings, DEVICE_1, self._observer_vocab_size, "observer_model"
+        )
+        performer_encodings = self._prepare_inputs_for_model(
+            encodings, DEVICE_2, self._performer_vocab_size, "performer_model"
+        )
+        observer_logits = self.observer_model(**observer_encodings).logits
+        performer_logits = self.performer_model(**performer_encodings).logits
         if DEVICE_1 != "cpu":
             torch.cuda.synchronize()
-        return observer_logits, performer_logits
+        return observer_logits, performer_logits, observer_encodings, performer_encodings
 
     def cleanup(self):
         if getattr(self, "observer_model", None) is not None:
@@ -383,15 +477,15 @@ class DetectLLM(object):
         """
         batch = [input_text] if isinstance(input_text, str) else input_text
         encodings = self._tokenize(batch)
-        observer_logits, performer_logits = self._get_logits(encodings)
+        observer_logits, performer_logits, observer_encodings, performer_encodings = self._get_logits(encodings)
 
         # ppl = auc_perplexity(encodings, performer_logits, repair_order="l2h")
-        ppl = sum_perplexity(encodings, performer_logits)
+        ppl = sum_perplexity(performer_encodings, performer_logits)
         # ppl = perplexity(encodings, performer_logits)
         x_ppl = entropy(
             observer_logits.to(DEVICE_1),
             performer_logits.to(DEVICE_1),
-            encodings.to(DEVICE_1),
+            observer_encodings.to(DEVICE_1),
             self.tokenizer.pad_token_id,
         )
 
@@ -406,13 +500,13 @@ class DetectLLM(object):
     ) -> Union[float, List[float]]:
         batch = [input_text] if isinstance(input_text, str) else input_text
         encodings = self._tokenize(batch)
-        observer_logits, performer_logits = self._get_logits(encodings)
+        observer_logits, performer_logits, observer_encodings, performer_encodings = self._get_logits(encodings)
 
-        ppl_auc = auc_perplexity(encodings, performer_logits, repair_order="h2l")
+        ppl_auc = auc_perplexity(performer_encodings, performer_logits, repair_order="h2l")
         x_ppl = entropy(
             observer_logits.to(DEVICE_1),
             performer_logits.to(DEVICE_1),
-            encodings.to(DEVICE_1),
+            observer_encodings.to(DEVICE_1),
             self.tokenizer.pad_token_id,
         )
 

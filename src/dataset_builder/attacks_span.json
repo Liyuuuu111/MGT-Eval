@@ -1,8 +1,0 @@
-{
-  "text_attacks": [
-    {
-      "type": "span",
-      "mask_filling_model_name": "/mnt/data2/hqdeng7/model/google-t5/t5-large"
-    }
-  ]
-}
