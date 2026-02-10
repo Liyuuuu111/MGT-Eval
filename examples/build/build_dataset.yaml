@@ -3,7 +3,6 @@ out: data/arxiv.llama32_3b.train.build.jsonl
 
 # Choose the prompt that generate MGT
 prompt_from_label: 0
-only_human_prompts: 1
 max_prompts: 0
 seed: 114514
 
@@ -12,15 +11,6 @@ tokenizer_strategy: auto
 prompt_template: "{prefix}"
 system_prompt: null
 machine_text_mode: prompt_plus
-
-# Optional dataset split for output file
-# When enabled, records in `out` will be deterministically split by group into:
-#   <out>.train.jsonl, <out>.dev.jsonl, <out>.test.jsonl
-# Ratios are in [0,10]. Any split with ratio=0 will be skipped.
-enable_dataset_split: false
-split_train_ratio: 8
-split_dev_ratio: 1
-split_test_ratio: 1
 
 max_new_tokens: 128
 min_new_tokens: 0
@@ -35,6 +25,15 @@ stop: null
 return_full_text: 1
 presence_penalty: 0.0
 frequency_penalty: 0.0
+
+# Optional dataset split for output file
+# When enabled, records in `out` will be deterministically split by group into:
+#   <out>.train.jsonl, <out>.dev.jsonl, <out>.test.jsonl
+# Ratios are in [0,10]. Any split with ratio=0 will be skipped.
+enable_dataset_split: false
+split_train_ratio: 8
+split_dev_ratio: 1
+split_test_ratio: 1
 
 # ===== backend =====
 backend: hf
@@ -52,7 +51,7 @@ vllm_tensor_parallel_size: 1
 vllm_enforce_eager: 0
 vllm_trust_remote_code: 0
 vllm_disable_log_stats: 1
-gen_batch_size: 64   # ：
+gen_batch_size: 64   # 新增：批量生成
 
 # ===== params =====
 max_new_tokens: 512

@@ -2,8 +2,8 @@ detector: longformer
 data: data/arxiv.qwen3_4b.test.jsonl
 model1: runs_longformer_YYYYMMDD-HHMMSS/best
 tokenizer: roberta-base
-ckpt_base: null
-lora_dir: null
+# ckpt_base: null
+# lora_dir: null
 batch_size: 4
 threshold: 0.5
 seed: 114514

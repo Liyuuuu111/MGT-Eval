@@ -2,8 +2,8 @@ detector: pecola
 data: data/arxiv.qwen3_4b.test.jsonl
 model1: runs_pecola_YYYYMMDD-HHMMSS/best
 tokenizer: null
-ckpt_base: null
-lora_dir: null
+# ckpt_base: null
+# lora_dir: null
 batch_size: 8
 threshold: 0.5
 seed: 114514

@@ -1,40 +1,31 @@
 # Attack-only dataset build (no generation). 
-# ：“/”，
-# ：mgteval-cli attack mgt_eval/examples/attack/build_attack_dataset.yaml
+# 用于：对一个“已构建/已有”的数据集做攻击，输出攻击后的数据集。
+# 用法：mgteval-cli attack mgt_eval/examples/attack/build_attack_dataset.yaml
 
-# ===== / =====
-# data: （json/jsonl  load_dataset_unified  spec）
+# ===== 输入/输出 =====
+# data: 输入数据集（json/jsonl 或可被 load_dataset_unified 解析的 spec）
 data: data/arxiv.qwen3_4b.test.jsonl
-# out: （jsonl）
+# out: 输出攻击后数据集路径（jsonl）
 out: data/attack/arxiv.qwen3_4b.test.attack.jsonl
 
-# =====  =====
-# attacks_config: （JSON） examples/attack/attacks_all.json
+# ===== 攻击配置 =====
+# attacks_config: 完整攻击配置文件（JSON）。建议使用 examples/attack/attacks_all.json。
+#   这里包含所有攻击类型及完整参数。
 attacks_config: examples/attack/attacks_example.json
 
-# ===== attack-only  =====
-# attack_dataset_only: 1=，
+# ===== attack-only 模式开关 =====
+# attack_dataset_only: 1=只做攻击，不生成机器文本
 attack_dataset_only: 1
-# only_attack_machine: 1= label==machine_label ；0=
+# only_attack_machine: 1=只攻击 label==machine_label 的样本；0=攻击所有样本
 only_attack_machine: 1
-# machine_label: “”（ 1）
+# machine_label: 输入数据集中“机器文本”的标签值（默认 1）
 machine_label: 1
-# sample_k:  K （None/<=0 ）
+# sample_k: 只随机攻击 K 条（None/<=0 代表全量）
 sample_k: 0
 
-# ===== prompt / prefix （attack-only  prompt/original ） =====
-# prompt_from_label:  prompt/original ； prompt
-prompt_from_label: 0
-# only_human_prompts: 1= label=0 (human)  prompt
-only_human_prompts: 1
-# max_prompts:  prompt （attack-only ）
-max_prompts: null
-# seed: （）
-seed: 114514
-
-# stop: JSON list string，: '["\n\n"]'
+# stop: JSON list string，例如: '["\n\n"]'
 stop: null
-# return_full_text: 1=prompt+completion, 0= completion
+# return_full_text: 1=prompt+completion, 0=仅 completion
 return_full_text: 1
 presence_penalty: 0.0
 frequency_penalty: 0.0

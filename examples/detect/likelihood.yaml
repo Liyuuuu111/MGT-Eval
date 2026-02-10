@@ -7,7 +7,7 @@ seed: 114514
 sample_k: 2000
 device: 'cuda:0'
 bf16: true
-out: 'runs/<detector>'
+out: 'runs/likelihood'
 save_curves: true
 no_progress: false
 k_runs: 1
