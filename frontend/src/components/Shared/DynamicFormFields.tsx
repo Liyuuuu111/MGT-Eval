@@ -260,6 +260,46 @@ export const DynamicFormFields: React.FC<DynamicFormFieldsProps> = ({
 
     // Handle string - check if it's a model field
     if (typeof value === 'string') {
+      // Detector field for HF-style finetuned detector aliases (e.g., hf:roberta-base)
+      if (
+        keyLower === 'detector'
+        && (value.toLowerCase().startsWith('hf:') || normalizedDetectorValue.startsWith('hf:'))
+      ) {
+        return (
+          <Form.Item
+            key={fieldPath}
+            name={fieldName}
+            label={resolvedLabel}
+            extra={fieldHelp}
+            normalize={(inputValue: any) => {
+              if (inputValue === null || inputValue === undefined) {
+                return inputValue;
+              }
+              const text = String(inputValue).trim();
+              if (!text) {
+                return '';
+              }
+              if (text.toLowerCase().startsWith('hf:')) {
+                return text;
+              }
+              return `hf:${text}`;
+            }}
+            getValueProps={(inputValue: any) => {
+              if (typeof inputValue === 'string' && inputValue.toLowerCase().startsWith('hf:')) {
+                return { value: inputValue.slice(3) };
+              }
+              return { value: inputValue };
+            }}
+          >
+            <ModelSelector
+              allowManual
+              presetOptions={FINETUNED_BACKBONE_PRESETS}
+              presetLabel="Finetuned Backbones"
+            />
+          </Form.Item>
+        );
+      }
+
       // Enumerated field: machine_text_mode
       if (keyLower === 'machine_text_mode') {
         return (
