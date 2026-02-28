@@ -167,7 +167,7 @@ const App: React.FC = () => {
     };
 
     pingBackend();
-    const intervalId = window.setInterval(pingBackend, 5000);
+    const intervalId = window.setInterval(pingBackend, 10000);
     return () => {
       mounted = false;
       window.clearInterval(intervalId);
@@ -368,7 +368,7 @@ const App: React.FC = () => {
           />
         </Sider>
         <Content style={{ padding: '24px', background: '#f0f2f5', marginLeft: '250px' }}>
-          <SystemMonitorPanel />
+          {/* <SystemMonitorPanel /> */}
           {renderSection()}
         </Content>
       </Layout>
