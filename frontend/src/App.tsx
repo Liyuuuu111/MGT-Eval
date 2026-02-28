@@ -18,7 +18,7 @@ import { AttackSection } from './components/Attack/AttackSection';
 import { TrainSection } from './components/Train/TrainSection';
 import { DetectSection } from './components/Detect/DetectSection';
 import { DemoSection } from './components/Demo/DemoSection';
-import { SystemMonitorPanel } from './components/Shared/SystemMonitorPanel';
+// import { SystemMonitorPanel } from './components/Shared/SystemMonitorPanel';
 import { LanguageSwitcher } from './components/Shared/LanguageSwitcher';
 import { useUILanguage } from './hooks/useUILanguage';
 import { useStore } from './store';
