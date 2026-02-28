@@ -70,7 +70,7 @@ const DEEPSEEK_ZH_TEXTS = [
 
 const DEMO_EXAMPLES_STATIC: Array<{ title: string; text: string | null; icon: React.ReactNode }> = [
   {
-    title: '人类中文',
+    title: 'Human: Chinese',
     icon: <BookTwoTone twoToneColor="#52c41a" />,
     text: `一个北憨的十年：
 17岁：表白同桌女神，女神让你好好照照镜子

@@ -4,3 +4,5 @@ __pycache__/
 *.pyd
 .pytest_cache/
 *.log
+frontend/node_modules
+static
