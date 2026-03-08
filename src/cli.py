@@ -1,0 +1,3247 @@
+# mgt_eval/cli.py
+import argparse, json, os, time, sys
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional, List
+from types import SimpleNamespace
+import random
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+# Optional rich for nicer CLI output
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.syntax import Syntax
+    from rich.logging import RichHandler
+    from rich.traceback import install as _rich_tb_install
+    _HAS_RICH = True
+    _RICH_CONSOLE = Console(markup=False, soft_wrap=True)
+    _RICH_CONSOLE_ERR = Console(markup=False, soft_wrap=True, stderr=True)
+except Exception:
+    _HAS_RICH = False
+    _RICH_CONSOLE = None
+    _RICH_CONSOLE_ERR = None
+
+# =========================
+# Built-in SeqCls backbones (ENUMERATED)
+# =========================
+_SEQCLS_BACKBONES = [
+    # RoBERTa
+    "roberta-base",
+    "roberta-large",
+    "distilroberta-base",
+
+    # XLM-R
+    "xlm-roberta-base",
+    "xlm-roberta-large",
+
+    # BERT family
+    "bert-base-uncased",
+    "bert-large-uncased",
+    "distilbert-base-uncased",
+
+    # DeBERTa (，）
+    "microsoft/deberta-v3-base",
+    "microsoft/deberta-v3-large",
+
+    # ELECTRA（）
+    "google/electra-base-discriminator",
+]
+_SEQCLS_BACKBONES_L = {x.lower(): x for x in _SEQCLS_BACKBONES}
+
+# ：（）
+_HF_ALIASES = {
+    # DeBERTa v3
+    "deberta-v3-base": "microsoft/deberta-v3-base",
+    "deberta-v3-large": "microsoft/deberta-v3-large",
+    # DeBERTa v2
+    "deberta-v2-xlarge": "microsoft/deberta-v2-xlarge",
+    "deberta-v2-xxlarge": "microsoft/deberta-v2-xxlarge",
+    # ELECTRA
+    "electra-base-discriminator": "google/electra-base-discriminator",
+    "electra-large-discriminator": "google/electra-large-discriminator",
+}
+
+def _parse_attack_dataset_single(v, *, data_fallback: Optional[str] = None) -> Optional[List[str]]:
+    """
+    支持三种写法（最终都只得到 0/1 个 attack dataset）：
+      1) 不传 --attack -> None
+      2) 传 --attack (无参数) -> 使用 --data 作为 attack dataset（paired-record 攻击数据集）
+      3) 传 --attack path.jsonl -> 使用该 path
+    同时兼容旧写法：如果 argparse 产生 list（比如历史脚本用 action=append），也会检测并强制只留一个。
+    """
+    if v is None:
+        return None
+
+    # ： v  list（）， 1
+    if isinstance(v, list):
+        items = []
+        for x in v:
+            if x is None:
+                continue
+            s = str(x).strip()
+            if not s:
+                continue
+            items.append(s)
+        if not items:
+            return None
+        if len(items) > 1:
+            raise SystemExit(f"[MGTEval][detect] --attack only supports ONE dataset, got: {items}")
+        v = items[0]
+
+    s = str(v).strip()
+    # 2：--attack（） -> const="__SELF__"
+    if s == "__SELF__":
+        if not data_fallback:
+            raise SystemExit("[MGTEval][detect] --attack used without a path, but --data is empty.")
+        return [str(data_fallback)]
+
+    # 3：--attack a.jsonl,b.jsonl （）
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if len(parts) != 1:
+        raise SystemExit(f"[MGTEval][detect] --attack only supports ONE dataset (no commas). Got: {s}")
+    return parts
+
+def _resolve_hf_id_or_path(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return s
+    # allow "hf:<id_or_path>" prefix as a force-HF hint
+    if s.lower().startswith("hf:"):
+        s = s[3:].strip()
+    # （HF save_pretrained ）
+    if os.path.isdir(s) and os.path.exists(os.path.join(s, "config.json")):
+        return s
+    return _HF_ALIASES.get(s.lower(), s)
+
+
+def _resolve_modelscope_snapshot(model_ref: str) -> str:
+    """
+    Resolve a ModelScope model id/path to a local snapshot directory.
+    If `model_ref` is already a local HF-style directory, return as-is.
+    """
+    ref = str(model_ref or "").strip()
+    if not ref:
+        raise ValueError("empty model_ref for ModelScope resolution")
+
+    # already local
+    if os.path.isdir(ref) and os.path.exists(os.path.join(ref, "config.json")):
+        return ref
+
+    try:
+        from modelscope import snapshot_download  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "hf_endpoint=modelscope was requested, but `modelscope` is not installed.\n"
+            "Please install it first: pip install -U modelscope"
+        ) from e
+
+    cache_dir = os.environ.get("MODELSCOPE_CACHE", None)
+    try:
+        if cache_dir and str(cache_dir).strip():
+            local_dir = snapshot_download(ref, cache_dir=cache_dir)
+        else:
+            local_dir = snapshot_download(ref)
+    except TypeError:
+        # Compatibility fallback for older modelscope signatures
+        local_dir = snapshot_download(ref)
+    except Exception as e:
+        raise RuntimeError(f"ModelScope snapshot download failed for '{ref}': {e}") from e
+
+    local_dir_s = str(local_dir or "").strip()
+    if not local_dir_s:
+        raise RuntimeError(f"ModelScope returned empty snapshot path for '{ref}'")
+    return local_dir_s
+
+def _infer_hidden_size(cfg) -> int:
+    for k in ("hidden_size", "n_embd", "d_model", "dim"):
+        if hasattr(cfg, k):
+            return int(getattr(cfg, k))
+    raise ValueError(f"Cannot infer hidden size from config: {type(cfg)}")
+
+def _has_trainer(name: str) -> bool:
+    """Return True if `name` is a registered finetune trainer."""
+    if not name:
+        return False
+    try:
+        from detectors import ensure_all_detectors_registered
+        ensure_all_detectors_registered()
+        from train.registry import get_trainer
+        _ = get_trainer(name)  # may raise
+        return True
+    except Exception:
+        return False
+
+def _is_metric_detector(name: str) -> bool:
+    if not name:
+        return False
+    try:
+        from detectors.registry import get_detector_cls
+        cls = get_detector_cls(name)
+    except Exception:
+        return False
+    mod = getattr(cls, "__module__", "") or ""
+    return "detectors.metric" in mod
+
+def _load_yaml_config(path: str) -> Dict[str, Any]:
+    if yaml is None:
+        raise SystemExit("[MGTEval][train] PyYAML not available; cannot load YAML config.")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        raise SystemExit(f"[MGTEval][train] Failed to read YAML: {path}: {e}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"[MGTEval][train] YAML root must be a dict/object: {path}")
+    return data
+
+def _resolve_yaml_path(cand: str) -> Optional[str]:
+    if not cand:
+        return None
+    # expand ~ and env vars
+    p = Path(os.path.expandvars(os.path.expanduser(cand)))
+    if p.is_file():
+        return str(p)
+    # fallback: try relative to repo root (parent of src/)
+    try:
+        repo_root = Path(__file__).resolve().parents[1]
+        p2 = repo_root / cand
+        if p2.is_file():
+            return str(p2)
+    except Exception:
+        pass
+    return None
+
+
+def _is_null_like(value: Any) -> bool:
+    if value is None:
+        return True
+    s = str(value).strip()
+    return (not s) or (s.lower() in {"null", "none", "auto"})
+
+
+def _expand_user_path(path_text: str) -> str:
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(str(path_text).strip())))
+
+
+def _looks_like_hf_model_dir(path_text: str) -> bool:
+    p = str(path_text).strip()
+    if not p or (not os.path.isdir(p)):
+        return False
+    marker_files = (
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    )
+    return any(os.path.exists(os.path.join(p, fn)) for fn in marker_files)
+
+
+def _list_subdirs(path_text: str) -> List[str]:
+    p = str(path_text).strip()
+    if not p or (not os.path.isdir(p)):
+        return []
+    out: List[str] = []
+    try:
+        with os.scandir(p) as it:
+            for ent in it:
+                try:
+                    if ent.is_dir():
+                        out.append(ent.path)
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return out
+
+
+def _run_dir_to_ckpt_dir(run_dir: str) -> Optional[Dict[str, Any]]:
+    rd = str(run_dir).strip()
+    if not rd or (not os.path.isdir(rd)):
+        return None
+    best_dir = os.path.join(rd, "best")
+    if os.path.isdir(best_dir):
+        return {"path": best_dir, "rank": 2, "kind": "best"}
+    last_dir = os.path.join(rd, "last")
+    if os.path.isdir(last_dir):
+        return {"path": last_dir, "rank": 1, "kind": "last"}
+    if _looks_like_hf_model_dir(rd):
+        return {"path": rd, "rank": 0, "kind": "model"}
+    return None
+
+
+def _detective_ckpt_from_dir(path_text: str) -> Optional[Dict[str, Any]]:
+    d = str(path_text).strip()
+    if not d or (not os.path.isdir(d)):
+        return None
+    cands = [
+        ("model_best.pth", 4, "best"),
+        (os.path.join("best", "model_best.pth"), 4, "best"),
+        ("model_last.pth", 3, "last"),
+        (os.path.join("last", "model_last.pth"), 3, "last"),
+        ("model_classifier_best.pth", 2, "best_classifier"),
+        (os.path.join("best", "model_classifier_best.pth"), 2, "best_classifier"),
+        ("model_classifier_last.pth", 1, "last_classifier"),
+        (os.path.join("last", "model_classifier_last.pth"), 1, "last_classifier"),
+    ]
+    for rel, rank, kind in cands:
+        p = os.path.join(d, rel)
+        if os.path.isfile(p):
+            return {"path": p, "rank": rank, "kind": kind}
+    return None
+
+
+def _collect_model_search_roots(detector_name: str, explicit_roots: Optional[str]) -> List[str]:
+    roots: List[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        s = str(p or "").strip()
+        if not s:
+            return
+        norm = _expand_user_path(s)
+        if norm in seen:
+            return
+        seen.add(norm)
+        roots.append(norm)
+
+    if explicit_roots is not None:
+        for part in str(explicit_roots).replace(";", ",").split(","):
+            s = part.strip()
+            if s:
+                _add(s)
+
+    env_roots = os.environ.get("MGTEVAL_MODEL_SEARCH_ROOT", "")
+    if env_roots:
+        for part in str(env_roots).split(os.pathsep):
+            s = part.strip()
+            if s:
+                _add(s)
+
+    det = str(detector_name or "").strip().lower()
+    repo_root = str(Path(__file__).resolve().parents[1])
+    cwd_root = os.getcwd()
+
+    for base in (cwd_root, repo_root):
+        _add(os.path.join(base, "models", f"runs_{det}"))
+        _add(os.path.join(base, f"runs_{det}"))
+        _add(os.path.join(base, "models"))
+        _add(base)
+
+    return roots
+
+
+def _find_latest_ckpt_dir(
+    *,
+    search_roots: List[str],
+    keyword: str,
+) -> Optional[str]:
+    key = str(keyword or "").strip().lower()
+    best_score = None
+    best_path = None
+    visited_run_dirs: set[str] = set()
+
+    def _iter_run_dirs(root_dir: str):
+        # root / root/* / root/*/* / root/*/*/* (covers common and nested detector layouts)
+        yield root_dir
+        children = _list_subdirs(root_dir)
+        for ch in children:
+            yield ch
+        for ch in children:
+            grandchildren = _list_subdirs(ch)
+            for g in grandchildren:
+                yield g
+            for g in grandchildren:
+                for gg in _list_subdirs(g):
+                    yield gg
+
+    for root in search_roots:
+        if not root or (not os.path.isdir(root)):
+            continue
+        for run_dir in _iter_run_dirs(root):
+            rd = _expand_user_path(run_dir)
+            if rd in visited_run_dirs:
+                continue
+            visited_run_dirs.add(rd)
+
+            if key and (key not in rd.lower()):
+                continue
+
+            ck = _run_dir_to_ckpt_dir(rd)
+            if ck is None:
+                continue
+            ck_path = str(ck["path"])
+            rank = int(ck["rank"])
+            try:
+                mt = float(os.path.getmtime(rd))
+            except Exception:
+                try:
+                    mt = float(os.path.getmtime(ck_path))
+                except Exception:
+                    mt = -1.0
+
+            score = (mt, rank, ck_path)
+            if (best_score is None) or (score > best_score):
+                best_score = score
+                best_path = ck_path
+
+    return best_path
+
+
+def _find_latest_detective_ckpt_file(
+    *,
+    search_roots: List[str],
+    keyword: str,
+) -> Optional[str]:
+    key = str(keyword or "").strip().lower()
+    best_score = None
+    best_path = None
+    visited_dirs: set[str] = set()
+
+    def _iter_dirs(root_dir: str):
+        # root / root/* / root/*/* / root/*/*/* / root/*/*/*/*
+        lvl1 = _list_subdirs(root_dir)
+        yield root_dir
+        for d1 in lvl1:
+            yield d1
+        lvl2: List[str] = []
+        for d1 in lvl1:
+            s2 = _list_subdirs(d1)
+            lvl2.extend(s2)
+            for d2 in s2:
+                yield d2
+        lvl3: List[str] = []
+        for d2 in lvl2:
+            s3 = _list_subdirs(d2)
+            lvl3.extend(s3)
+            for d3 in s3:
+                yield d3
+        for d3 in lvl3:
+            for d4 in _list_subdirs(d3):
+                yield d4
+
+    for root in search_roots:
+        if not root or (not os.path.isdir(root)):
+            continue
+        for d in _iter_dirs(root):
+            nd = _expand_user_path(d)
+            if nd in visited_dirs:
+                continue
+            visited_dirs.add(nd)
+            if key and (key not in nd.lower()):
+                continue
+
+            picked = _detective_ckpt_from_dir(nd)
+            if picked is None:
+                continue
+
+            ck = str(picked["path"])
+            rank = int(picked["rank"])
+            # For best/last directories, compare by parent run mtime first.
+            run_ref = nd
+            base = os.path.basename(nd).lower()
+            if base in {"best", "last"}:
+                run_ref = os.path.dirname(nd)
+
+            try:
+                mt = float(os.path.getmtime(run_ref))
+            except Exception:
+                try:
+                    mt = float(os.path.getmtime(ck))
+                except Exception:
+                    mt = -1.0
+
+            score = (mt, rank, ck)
+            if (best_score is None) or (score > best_score):
+                best_score = score
+                best_path = ck
+
+    return best_path
+
+
+def _resolve_detect_seqcls_model1(
+    *,
+    detector_name: str,
+    model1: Any,
+    model1_keyword: Any = None,
+    model1_search_root: Any = None,
+) -> Dict[str, Any]:
+    raw_model1 = "" if model1 is None else str(model1).strip()
+    explicit_kw = None if _is_null_like(model1_keyword) else str(model1_keyword).strip().lower()
+    keyword = explicit_kw or str(detector_name or "").strip().lower()
+
+    out: Dict[str, Any] = {
+        "input": raw_model1,
+        "resolved": None,
+        "auto_used": False,
+        "reason": "unknown",
+        "keyword": keyword,
+        "searched_roots": [],
+    }
+
+    # Explicit model1 provided
+    if not _is_null_like(raw_model1):
+        cand_dir = _expand_user_path(raw_model1)
+        if os.path.isdir(cand_dir):
+            ck = _run_dir_to_ckpt_dir(cand_dir)
+            if ck is not None:
+                out["resolved"] = str(ck["path"])
+                out["auto_used"] = (str(ck["path"]) != cand_dir)
+                out["reason"] = f"explicit_dir_{ck.get('kind', 'model')}"
+                out["searched_roots"] = [cand_dir]
+                return out
+
+            # Explicit directory but not directly a checkpoint/model dir:
+            # treat as root and pick latest nested best/last.
+            nested = _find_latest_ckpt_dir(
+                search_roots=[cand_dir],
+                keyword=(explicit_kw or ""),
+            )
+            if nested:
+                out["resolved"] = nested
+                out["auto_used"] = True
+                out["reason"] = "explicit_root_latest_nested"
+                out["searched_roots"] = [cand_dir]
+                return out
+
+            out["resolved"] = cand_dir
+            out["auto_used"] = False
+            out["reason"] = "explicit_dir_as_is"
+            out["searched_roots"] = [cand_dir]
+            return out
+
+        # Non-directory input: keep as provided (HF id / file path / etc.)
+        out["resolved"] = raw_model1
+        out["auto_used"] = False
+        out["reason"] = "explicit_non_dir_as_is"
+        return out
+
+    # model1 missing/null/auto: auto-search local checkpoints
+    roots = _collect_model_search_roots(str(detector_name or ""), None if model1_search_root is None else str(model1_search_root))
+    out["searched_roots"] = roots
+    found = _find_latest_ckpt_dir(search_roots=roots, keyword=keyword)
+    if found:
+        out["resolved"] = found
+        out["auto_used"] = True
+        out["reason"] = "auto_from_null"
+    else:
+        out["resolved"] = None
+        out["auto_used"] = True
+        out["reason"] = "auto_not_found"
+    return out
+
+
+def _resolve_detective_embedding_ckpt(
+    *,
+    detector_name: str,
+    ckpt_path: Any,
+    model1_keyword: Any = None,
+    model1_search_root: Any = None,
+) -> Dict[str, Any]:
+    raw = "" if ckpt_path is None else str(ckpt_path).strip()
+    explicit_kw = None if _is_null_like(model1_keyword) else str(model1_keyword).strip().lower()
+    keyword = explicit_kw or str(detector_name or "").strip().lower()
+
+    out: Dict[str, Any] = {
+        "input": raw,
+        "resolved": None,
+        "auto_used": False,
+        "reason": "unknown",
+        "keyword": keyword,
+        "searched_roots": [],
+    }
+
+    if not _is_null_like(raw):
+        p = _expand_user_path(raw)
+        if os.path.isfile(p):
+            out["resolved"] = p
+            out["auto_used"] = False
+            out["reason"] = "explicit_file"
+            out["searched_roots"] = [os.path.dirname(p)]
+            return out
+
+        if os.path.isdir(p):
+            direct = _detective_ckpt_from_dir(p)
+            if direct is not None:
+                out["resolved"] = str(direct["path"])
+                out["auto_used"] = True
+                out["reason"] = f"explicit_dir_{direct.get('kind', 'detective_ckpt')}"
+                out["searched_roots"] = [p]
+                return out
+
+            nested = _find_latest_detective_ckpt_file(
+                search_roots=[p],
+                keyword=(explicit_kw or ""),
+            )
+            if nested:
+                out["resolved"] = nested
+                out["auto_used"] = True
+                out["reason"] = "explicit_root_latest_nested"
+                out["searched_roots"] = [p]
+                return out
+
+            out["resolved"] = raw
+            out["auto_used"] = False
+            out["reason"] = "explicit_dir_no_ckpt"
+            out["searched_roots"] = [p]
+            return out
+
+        out["resolved"] = raw
+        out["auto_used"] = False
+        out["reason"] = "explicit_non_path_as_is"
+        return out
+
+    roots = _collect_model_search_roots(str(detector_name or ""), None if model1_search_root is None else str(model1_search_root))
+    out["searched_roots"] = roots
+    found = _find_latest_detective_ckpt_file(search_roots=roots, keyword=keyword)
+    if found:
+        out["resolved"] = found
+        out["auto_used"] = True
+        out["reason"] = "auto_from_null"
+    else:
+        out["resolved"] = None
+        out["auto_used"] = True
+        out["reason"] = "auto_not_found"
+    return out
+
+def _maybe_extract_yaml(argv: Optional[List[str]]) -> (Optional[str], Optional[Dict[str, Any]], Optional[List[str]], Optional[str]):
+    if argv is None:
+        return None, None, None, None
+    if not argv:
+        return None, None, argv, None
+    cmd = argv[0]
+    if cmd not in {"train", "detect", "calibrate", "build", "attack"}:
+        return None, None, argv, None
+    if len(argv) < 2:
+        return None, None, argv, None
+    cand = argv[1]
+    if not cand or cand.startswith("-"):
+        return None, None, argv, None
+    lc = cand.lower()
+    if not (lc.endswith(".yaml") or lc.endswith(".yml")):
+        return None, None, argv, None
+    resolved = _resolve_yaml_path(cand)
+    if not resolved:
+        return None, None, argv, None
+    cfg = _load_yaml_config(resolved)
+    new_argv = [cmd] + argv[2:]
+    return cmd, cfg, new_argv, resolved
+
+def _missing_required(args, keys: List[str]) -> List[str]:
+    miss = []
+    for k in keys:
+        v = getattr(args, k, None)
+        if v is None:
+            miss.append(k)
+        elif isinstance(v, str) and v.strip() == "":
+            miss.append(k)
+    return miss
+
+
+def _safe_tag(s: str) -> str:
+    s = (s or "").strip()
+    return "".join([c if c.isalnum() or c in "._-+" else "-" for c in s]).strip("-") or "run"
+
+def _color_num(val, color: str = "33") -> str:
+    """
+    Highlight numeric values with ANSI color when stdout is a TTY.
+    Default color: yellow (33).
+    """
+    s = str(val)
+    try:
+        if sys.stdout.isatty():
+            return f"\033[{color}m{s}\033[0m"
+    except Exception:
+        pass
+    return s
+
+def _fmt_sample_k(val) -> str:
+    if val is None:
+        return "all"
+    try:
+        iv = int(val)
+        if iv <= 0:
+            return "all"
+        return _color_num(iv)
+    except Exception:
+        return str(val)
+
+def _as_bool(val: Any, default: bool = True) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    try:
+        return bool(int(val))
+    except Exception:
+        return bool(val)
+
+def _rprint(*objs, **kwargs) -> None:
+    if _HAS_RICH and _RICH_CONSOLE is not None:
+        _RICH_CONSOLE.print(*objs, **kwargs)
+    else:
+        # strip rich-only kwargs
+        for k in ("style", "markup", "highlight", "justify", "overflow", "no_wrap", "soft_wrap"):
+            if k in kwargs:
+                kwargs.pop(k, None)
+        print(*objs, **kwargs)
+
+def _rprint_json(obj: Any) -> None:
+    if _HAS_RICH and _RICH_CONSOLE is not None:
+        try:
+            s = json.dumps(obj, ensure_ascii=False, indent=2)
+        except Exception:
+            s = str(obj)
+        try:
+            _RICH_CONSOLE.print(Syntax(s, "json", theme="ansi_dark", line_numbers=False))
+        except Exception:
+            _RICH_CONSOLE.print(s)
+    else:
+        print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+def _install_rich_print() -> None:
+    if not (_HAS_RICH and _RICH_CONSOLE is not None):
+        return
+    import builtins
+    import sys as _sys
+
+    _orig_print = builtins.print
+
+    def _rich_print(*objs, **kwargs):
+        # Preserve print signature as much as possible.
+        sep = kwargs.pop("sep", " ")
+        end = kwargs.pop("end", "\n")
+        file = kwargs.pop("file", None)
+        flush = kwargs.pop("flush", False)
+
+        # If printing to a non-stdout/stderr file, fall back to original print.
+        if file not in (None, _sys.stdout, _sys.stderr):
+            return _orig_print(*objs, sep=sep, end=end, file=file, flush=flush)
+
+        console = _RICH_CONSOLE_ERR if file is _sys.stderr else _RICH_CONSOLE
+        if console is None:
+            return _orig_print(*objs, sep=sep, end=end, file=file, flush=flush)
+
+        console.print(*objs, sep=sep, end=end, **kwargs)
+        if flush:
+            try:
+                console.file.flush()
+            except Exception:
+                pass
+
+    builtins.print = _rich_print
+
+    # Pretty traceback (only when rich is available)
+    try:
+        _rich_tb_install(
+            console=_RICH_CONSOLE_ERR,
+            show_locals=False,
+            extra_lines=1,
+        )
+    except Exception:
+        pass
+
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger("mgt_eval")
+    if not logger.handlers:
+        if _HAS_RICH:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(message)s",
+                handlers=[RichHandler(rich_tracebacks=True, show_time=False, show_level=True)],
+            )
+        else:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="[%(levelname)s] %(message)s",
+            )
+    return logger
+
+def _log_yaml_if_any(logger: logging.Logger, args) -> None:
+    cfg = getattr(args, "_yaml_cfg", None)
+    if not isinstance(cfg, dict):
+        return
+    path = getattr(args, "_yaml_path", None)
+    if path:
+        logger.info("YAML config path: %s", path)
+    try:
+        logger.info("YAML config: %s", json.dumps(cfg, ensure_ascii=False, indent=2))
+    except Exception:
+        logger.info("YAML config: %s", str(cfg))
+
+def _log_train_config(logger: logging.Logger, common: Dict[str, Any], extra: Dict[str, Any]) -> None:
+    payload = {
+        "detector": common.get("detector"),
+        "dataset_train": common.get("dataset_train"),
+        "dataset_val": common.get("dataset_val"),
+        "dataset_test": common.get("dataset_test"),
+        "dataset_aux1": common.get("dataset_aux1"),
+        "dataset_aux2": common.get("dataset_aux2"),
+        "sample_k_train": common.get("sample_k_train"),
+        "sample_k_val": common.get("sample_k_val"),
+        "sample_k_test": common.get("sample_k_test"),
+        "sample_k_aux1": common.get("sample_k_aux1"),
+        "sample_k_aux2": common.get("sample_k_aux2"),
+        "model1": common.get("model1"),
+        "model2": common.get("model2"),
+        "model3": common.get("model3"),
+        "tokenizer": common.get("tokenizer"),
+        "output_dir": common.get("output_dir"),
+        "seed": common.get("seed"),
+        "epochs": common.get("epochs"),
+        "train_batch_size": common.get("train_batch_size"),
+        "eval_batch_size": common.get("eval_batch_size"),
+        "lr": common.get("lr"),
+        "weight_decay": common.get("weight_decay"),
+        "warmup_ratio": common.get("warmup_ratio"),
+        "grad_accum_steps": common.get("grad_accum_steps"),
+        "max_length": common.get("max_length"),
+        "fp16": common.get("fp16"),
+        "bf16": common.get("bf16"),
+        "device": common.get("device"),
+        "name": common.get("name"),
+        "train_kwargs_extra": extra,
+    }
+    logger.info("Train config: %s", json.dumps(payload, ensure_ascii=False, indent=2))
+
+def _log_detector_citation_by_name(logger: logging.Logger, det_name: str) -> None:
+    if not det_name:
+        return
+    if getattr(logger, "_mgt_eval_citation_logged", False):
+        return
+    try:
+        from detectors.registry import get_detector_cls
+        cls = get_detector_cls(det_name)
+    except Exception:
+        return
+    try:
+        title = getattr(cls, "CITATION_TITLE", None)
+        authors = getattr(cls, "CITATION_AUTHORS", None)
+        link = getattr(cls, "CITATION_LINK", None)
+        if title or authors or link:
+            logger.info(
+                "[mgt_eval] Credits: %s | Paper: %s | Link: %s",
+                authors or "Unknown authors",
+                title or "N/A",
+                link or "N/A",
+            )
+        logger.info(
+            "[mgt_eval] Disclaimer: This implementation may differ slightly from the original reference; "
+            "results might not exactly match those reported in the paper."
+        )
+        logger._mgt_eval_citation_logged = True
+    except Exception:
+        pass
+
+# =========================
+# Dataset Builder (build/attack) helpers
+# =========================
+def _add_dataset_builder_args(ap: argparse.ArgumentParser, *, yaml_cmd: Optional[str]) -> None:
+    # core I/O
+    ap.add_argument("--data", required=(yaml_cmd not in {"build", "attack"}))
+    ap.add_argument("--out", required=(yaml_cmd not in {"build", "attack"}))
+
+    # prompt/source selection
+    ap.add_argument("--prompt_from_label", type=int, default=0)
+    ap.add_argument("--only_human_prompts", type=int, default=1)
+    ap.add_argument("--max_prompts", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=114514)
+
+    # prefix/tokenizer
+    ap.add_argument("--prefix_k_tokens", type=int, default=64)
+    ap.add_argument("--tokenizer_strategy", type=str, default="auto", help="auto | whitespace | hf:<tok_name>")
+
+    # prompt templating
+    ap.add_argument("--prompt_template", type=str, default="{prefix}")
+    ap.add_argument("--prompt_template_file", type=str, default=None)
+    ap.add_argument("--system_prompt", type=str, default=None)
+    ap.add_argument("--machine_text_mode", type=str, default="prompt_plus", choices=["prompt_plus", "completion_only"])
+
+    # generation params
+    ap.add_argument("--max_new_tokens", type=int, default=128)
+    ap.add_argument("--min_new_tokens", type=int, default=0)
+    ap.add_argument("--do_sample", type=int, default=1, help="1/0")
+    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--top_p", type=float, default=0.95)
+    ap.add_argument("--top_k", type=int, default=0)
+    ap.add_argument("--num_beams", type=int, default=1)
+    ap.add_argument("--repetition_penalty", type=float, default=1.0)
+    ap.add_argument("--no_repeat_ngram_size", type=int, default=0)
+    ap.add_argument("--stop", type=str, default=None, help="json list of stop strings, e.g. '[\"\\n\\n\"]'")
+    ap.add_argument("--return_full_text", type=int, default=1, help="1: prompt+completion, 0: completion only")
+    ap.add_argument("--presence_penalty", type=float, default=0.0)
+    ap.add_argument("--frequency_penalty", type=float, default=0.0)
+    ap.add_argument("--gen_batch_size", type=int, default=1, help="batch size for base generation (build only)")
+
+    # attacks
+    ap.add_argument("--attacks_config", type=str, default=None, help="path to attacks json")
+    ap.add_argument("--attack", action="append", default=None,
+                    help="指定攻击类型（可重复）：span, para, typo, inse, dele, subs, tran, homo, form, syno, back_trans")
+    ap.add_argument("--attack_types", type=str, default=None, help="逗号分隔的攻击类型列表")
+    ap.add_argument("--attacks", type=str, default=None, help="(alias of --attack_types) e.g. --attacks dele,tran")
+    ap.add_argument(
+        "--attack_folder",
+        dest="save_attack_folder",
+        action="store_true",
+        help="Save all attack outputs into a single folder file (<out>.attacks/attacks.jsonl).",
+    )
+    ap.add_argument(
+        "--no-attack-folder",
+        dest="save_attack_folder",
+        action="store_false",
+        help="Split attack outputs into per-attack files (legacy behavior).",
+    )
+    ap.set_defaults(save_attack_folder=True)
+    ap.add_argument("--save_attack_outputs", type=int, default=1, help="1: save attack outputs, 0: only main out")
+    ap.add_argument("--keep_attack_aux_files", type=int, default=1, help="1: keep attacks_config temp files")
+
+    # backend
+    ap.add_argument("--backend", type=str, default=None, choices=["hf", "openai"])
+    ap.add_argument(
+        "--hf_endpoint",
+        type=str,
+        default=None,
+        help="Model download source. Use 'modelscope' to pull from modelscope.cn, "
+             "or set a custom HF mirror endpoint such as https://hf-mirror.com.",
+    )
+    ap.add_argument("--hf_model", type=str, default=None)
+    ap.add_argument("--hf_device", type=str, default="cuda:0")
+    ap.add_argument("--hf_dtype", type=str, default="auto", help="auto|float16|bfloat16|float32")
+    ap.add_argument("--hf_trust_remote_code", type=int, default=1)
+    # vLLM (optional for local HF backend)
+    ap.add_argument("--use_vllm", type=int, default=0, help="1: use vLLM for local HF backend")
+    ap.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
+    ap.add_argument("--vllm_max_model_len", type=int, default=None)
+    ap.add_argument("--vllm_dtype", type=str, default=None, help="auto|float16|bfloat16|float32")
+    ap.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
+    ap.add_argument("--vllm_enforce_eager", type=int, default=0)
+    ap.add_argument("--vllm_trust_remote_code", type=int, default=0)
+    ap.add_argument("--vllm_disable_log_stats", type=int, default=1)
+
+    ap.add_argument("--api_model", type=str, default=None)
+    ap.add_argument("--api_key", type=str, default=None)
+    ap.add_argument("--api_base", type=str, default=None, help="OpenAI-compatible base_url")
+    ap.add_argument("--api_endpoint", type=str, default="chat", choices=["chat", "completions"])
+    ap.add_argument("--api_timeout", type=int, default=120)
+
+    # quality metrics
+    ap.add_argument("--metric_ppl", type=int, default=0)
+    ap.add_argument("--ppl_model", type=str, default="gpt2")
+    ap.add_argument("--ppl_device", type=str, default="cuda:0")
+    ap.add_argument("--ppl_dtype", type=str, default="auto")
+    ap.add_argument("--ppl_stride", type=int, default=256)
+    ap.add_argument("--ppl_max_length", type=int, default=1024)
+
+    ap.add_argument("--metric_readability", type=int, default=0)
+
+    ap.add_argument("--metric_bertscore", type=int, default=0)
+    ap.add_argument("--bertscore_model", type=str, default="roberta-large")
+    ap.add_argument("--bertscore_device", type=str, default="cuda:0")
+    ap.add_argument("--bertscore_lang", type=str, default="en")
+    ap.add_argument("--bertscore_batch_size", type=int, default=8)
+    ap.add_argument("--bertscore_rescale", type=int, default=1)
+
+    # attack-only mode
+    ap.add_argument("--attack_dataset_only", type=int, default=0)
+    ap.add_argument("--only_attack_machine", type=int, default=1)
+    ap.add_argument("--machine_label", type=int, default=1)
+    ap.add_argument("--sample_k", type=int, default=None)
+
+    # optional dataset split (build output post-processing)
+    ap.add_argument("--enable_dataset_split", type=int, default=0, help="1: split out file to train/dev/test")
+    ap.add_argument("--split_train_ratio", type=int, default=8, help="train split ratio in [0,10]")
+    ap.add_argument("--split_dev_ratio", type=int, default=1, help="dev split ratio in [0,10]")
+    ap.add_argument("--split_test_ratio", type=int, default=1, help="test split ratio in [0,10]")
+
+def _run_dataset_builder(args, *, force_attack_only: Optional[bool] = None) -> None:
+    # lazy import to keep core CLI fast
+    from dataset_builder import cli as _db_cli
+    from dataset_builder.config import BuildConfig, GenConfig
+    from dataset_builder.builder import DatasetBuilder
+    from dataset_builder.quality_metrics import QualityConfig
+
+    _db_cli._silence_hf_logs()
+
+    attack_only = bool(int(getattr(args, "attack_dataset_only", 0)))
+    if force_attack_only is True:
+        attack_only = True
+    elif force_attack_only is False:
+        attack_only = False
+
+    template = args.prompt_template
+    if args.prompt_template_file:
+        template = _db_cli._read_text_file(args.prompt_template_file)
+
+    stop = None
+    if args.stop:
+        stop = json.loads(args.stop)
+
+    gen = GenConfig(
+        max_new_tokens=int(args.max_new_tokens),
+        min_new_tokens=int(args.min_new_tokens),
+        do_sample=bool(int(args.do_sample)),
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        top_k=int(args.top_k),
+        num_beams=int(args.num_beams),
+        repetition_penalty=float(args.repetition_penalty),
+        no_repeat_ngram_size=int(args.no_repeat_ngram_size),
+        stop=stop,
+        seed=int(args.seed),
+        return_full_text=bool(int(args.return_full_text)),
+        presence_penalty=float(args.presence_penalty),
+        frequency_penalty=float(args.frequency_penalty),
+    )
+
+    prompt_from_label = int(args.prompt_from_label)
+    if bool(int(args.only_human_prompts)):
+        prompt_from_label = 0
+
+    # allow inline attacks_config via YAML (dict/list -> dump to json next to out)
+    created_files: List[str] = []
+    if isinstance(getattr(args, "attacks_config", None), (dict, list)):
+        try:
+            out_p = Path(args.out)
+            inline_path = out_p.with_name(out_p.stem + ".attacks_inline.json")
+            inline_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(inline_path, "w", encoding="utf-8") as f:
+                json.dump(getattr(args, "attacks_config"), f, ensure_ascii=False, indent=2)
+            args.attacks_config = str(inline_path)
+            created_files.append(str(inline_path))
+        except Exception:
+            pass
+
+    attacks_config_path = _db_cli._resolve_attacks_config_path(args, created_files=created_files)
+    attacks_config_path = _db_cli._inject_humanize_attack_dataset(
+        attacks_config_path=attacks_config_path,
+        dataset_spec=args.data,
+        out_path=args.out,
+        created_files=created_files,
+    )
+
+    sample_k = args.sample_k
+    if sample_k is not None:
+        try:
+            sample_k = int(sample_k)
+            if sample_k <= 0:
+                sample_k = None
+        except Exception:
+            sample_k = None
+
+    cfg = BuildConfig(
+        dataset_spec=args.data,
+        out_jsonl=args.out,
+        prompt_from_label=prompt_from_label,
+        prefix_k_tokens=int(args.prefix_k_tokens),
+        tokenizer_strategy=str(args.tokenizer_strategy),
+        prompt_template=template,
+        system_prompt=args.system_prompt,
+        gen=gen,
+        attacks_config_path=attacks_config_path,
+        max_prompts=args.max_prompts,
+        sample_seed=int(args.seed),
+        machine_text_mode=args.machine_text_mode,
+        attack_dataset_only=attack_only,
+        save_attack_outputs=_as_bool(getattr(args, "save_attack_outputs", 1), default=True),
+        save_attack_folder=bool(getattr(args, "save_attack_folder", True)),
+        only_attack_machine=bool(int(args.only_attack_machine)),
+        machine_label=int(args.machine_label),
+        sample_k=sample_k,
+        gen_batch_size=int(getattr(args, "gen_batch_size", 1) or 1),
+        enable_dataset_split=bool(int(getattr(args, "enable_dataset_split", 0) or 0)),
+        split_train_ratio=int(getattr(args, "split_train_ratio", 8) or 0),
+        split_dev_ratio=int(getattr(args, "split_dev_ratio", 1) or 0),
+        split_test_ratio=int(getattr(args, "split_test_ratio", 1) or 0),
+    )
+
+    # Optional model download source switch:
+    # - modelscope => use ModelScope Hub for transformers/vLLM
+    # - other non-empty string => HF endpoint mirror/custom URL
+    hf_endpoint = getattr(args, "hf_endpoint", None)
+    use_modelscope = False
+    if hf_endpoint is not None:
+        endpoint = str(hf_endpoint).strip()
+        if endpoint:
+            endpoint_lower = endpoint.lower()
+            use_modelscope = (
+                endpoint_lower == "modelscope"
+                or endpoint_lower == "modelscope.cn"
+                or "modelscope.cn" in endpoint_lower
+            )
+            if use_modelscope:
+                os.environ.pop("HF_ENDPOINT", None)
+                os.environ["USE_MODELSCOPE_HUB"] = "1"
+                os.environ["VLLM_USE_MODELSCOPE"] = "True"
+                _rprint("[MGTEval][build] Using model download source: ModelScope (modelscope.cn)")
+            else:
+                os.environ["HF_ENDPOINT"] = endpoint
+                os.environ.pop("USE_MODELSCOPE_HUB", None)
+                os.environ.pop("VLLM_USE_MODELSCOPE", None)
+                _rprint(f"[MGTEval][build] Using HF endpoint: {endpoint}")
+        else:
+            os.environ.pop("HF_ENDPOINT", None)
+            os.environ.pop("USE_MODELSCOPE_HUB", None)
+            os.environ.pop("VLLM_USE_MODELSCOPE", None)
+
+    # For HF backend with modelscope source, resolve model id to local snapshot.
+    # This ensures transformers loads from local files instead of HF Hub requests.
+    if (not attack_only) and str(getattr(args, "backend", "")).lower() == "hf" and use_modelscope:
+        raw_model_ref = str(getattr(args, "hf_model", "") or "").strip()
+        if raw_model_ref:
+            _rprint(f"[MGTEval][build] Resolving ModelScope snapshot for: {raw_model_ref}")
+            resolved_model_ref = _resolve_modelscope_snapshot(raw_model_ref)
+            args.hf_model = resolved_model_ref
+            _rprint(f"[MGTEval][build] ModelScope snapshot ready: {resolved_model_ref}")
+
+    backend = None
+    if not attack_only:
+        if bool(int(getattr(args, "use_vllm", 0) or 0)):
+            # Prevent CUDA re-init failures in vLLM worker subprocesses.
+            os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+            os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
+        if args.backend == "hf":
+            if not args.hf_model:
+                raise ValueError("--hf_model is required when --backend hf")
+            from dataset_builder.backends.hf_local import HFLocalBackend
+            backend = HFLocalBackend(
+                model_name_or_path=args.hf_model,
+                device=args.hf_device,
+                torch_dtype=args.hf_dtype,
+                trust_remote_code=bool(int(args.hf_trust_remote_code)),
+                use_vllm=bool(int(getattr(args, "use_vllm", 0))),
+                vllm_gpu_memory_utilization=float(getattr(args, "vllm_gpu_memory_utilization", 0.9)),
+                vllm_max_model_len=(int(args.vllm_max_model_len) if args.vllm_max_model_len is not None else None),
+                vllm_dtype=getattr(args, "vllm_dtype", None),
+                vllm_tensor_parallel_size=int(getattr(args, "vllm_tensor_parallel_size", 1)),
+                vllm_enforce_eager=bool(int(getattr(args, "vllm_enforce_eager", 0))),
+                vllm_trust_remote_code=bool(int(getattr(args, "vllm_trust_remote_code", 0))),
+                vllm_disable_log_stats=bool(int(getattr(args, "vllm_disable_log_stats", 1))),
+            )
+        elif args.backend == "openai":
+            if not args.api_model:
+                raise ValueError("--api_model is required when --backend openai")
+            from dataset_builder.backends.openai_compat import OpenAICompatBackend
+            backend = OpenAICompatBackend(
+                model=args.api_model,
+                api_key=args.api_key,
+                base_url=args.api_base,
+                endpoint=args.api_endpoint,
+                timeout_s=int(args.api_timeout),
+            )
+        else:
+            raise ValueError("--backend is required unless --attack_dataset_only 1")
+
+    quality_cfg = None
+    if not attack_only:
+        quality_cfg = QualityConfig(
+            enable_ppl=bool(int(args.metric_ppl)),
+            enable_readability=bool(int(args.metric_readability)),
+            enable_bertscore=bool(int(args.metric_bertscore)),
+            only_human_prompts=bool(int(args.only_human_prompts)),
+            ppl_model=str(args.ppl_model),
+            ppl_device=str(args.ppl_device),
+            ppl_dtype=str(args.ppl_dtype),
+            ppl_stride=int(args.ppl_stride),
+            ppl_max_length=int(args.ppl_max_length),
+            bertscore_model=str(args.bertscore_model),
+            bertscore_device=str(args.bertscore_device),
+            bertscore_lang=str(args.bertscore_lang),
+            bertscore_batch_size=int(args.bertscore_batch_size),
+            bertscore_rescale=bool(int(args.bertscore_rescale)),
+        )
+        if not quality_cfg.any_enabled():
+            quality_cfg = None
+
+    try:
+        builder = DatasetBuilder(backend=backend, cfg=cfg, quality_cfg=quality_cfg)
+        stats = builder.build()
+        _rprint_json(stats)
+    finally:
+        if not _as_bool(getattr(args, "keep_attack_aux_files", 1), default=True):
+            for path in created_files:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+def _apply_vllm_kwargs(args, detector_kwargs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge optional vLLM-related CLI args into detector_kwargs.
+    """
+    if detector_kwargs is None:
+        detector_kwargs = {}
+    for key in (
+        "use_vllm",
+        "vllm_gpu_memory_utilization",
+        "vllm_max_model_len",
+        "vllm_dtype",
+        "vllm_tensor_parallel_size",
+        "vllm_enforce_eager",
+    ):
+        if hasattr(args, key):
+            val = getattr(args, key)
+            if val is not None:
+                detector_kwargs[key] = val
+    return detector_kwargs
+
+def _stratified_split_exact(examples, train_k: int, val_k: int, seed: int):
+    """
+    从 examples（list[dict{text,label}]) 中做分层抽样并精确切分到 train_k / val_k。
+    - train_k/val_k 可被实际数据量截断
+    - 返回 (train_list, val_list)
+    """
+    rng = random.Random(int(seed))
+    # label
+    buckets = {}
+    for i, ex in enumerate(examples):
+        y = int(ex["label"])
+        buckets.setdefault(y, []).append(ex)
+    for y in buckets:
+        rng.shuffle(buckets[y])
+
+    total = sum(len(v) for v in buckets.values())
+    if total == 0:
+        return [], []
+
+    want_total = max(0, int(train_k) + int(val_k))
+    want_total = min(want_total, total)
+
+    # label （ + ）
+    ys = sorted(buckets.keys())
+    base = {}
+    fracs = []
+    for y in ys:
+        prop = len(buckets[y]) / total
+        raw = prop * want_total
+        base[y] = int(raw)
+        fracs.append((raw - base[y], y))
+    cur = sum(base.values())
+    # want_total
+    fracs.sort(reverse=True)
+    for _, y in fracs:
+        if cur >= want_total:
+            break
+        if base[y] < len(buckets[y]):
+            base[y] += 1
+            cur += 1
+
+    # label  base[y]  val/train
+    val_k = min(int(val_k), want_total)
+    # val ： label
+    val_base = {y: 0 for y in ys}
+    if val_k > 0:
+        fracs2 = []
+        sel_total = sum(base.values()) or 1
+        for y in ys:
+            raw = (base[y] / sel_total) * val_k
+            val_base[y] = int(raw)
+            fracs2.append((raw - val_base[y], y))
+        cur2 = sum(val_base.values())
+        fracs2.sort(reverse=True)
+        for _, y in fracs2:
+            if cur2 >= val_k:
+                break
+            if val_base[y] < base[y]:
+                val_base[y] += 1
+                cur2 += 1
+
+    train, val = [], []
+    for y in ys:
+        chosen = buckets[y][:base[y]]
+        v = chosen[:val_base[y]]
+        t = chosen[val_base[y]:]
+        val.extend(v)
+        train.extend(t)
+
+    # （）
+    rng.shuffle(train)
+    rng.shuffle(val)
+    return train, val
+
+# =========================
+# Train CLI Adapter Layer
+# =========================
+
+# train “”（CLI ）
+# dataset_* / sample_k_* / model1-3 / tokenizer / output_dir / seed /
+_TRAIN_ADAPTERS: Dict[str, Dict[str, Any]] = {
+    # ---------- CoCo ----------
+    "coco": {
+        "required": ["dataset_train"],
+        "rename": {
+            "dataset_train": "dataset_training",
+            "dataset_val": "dataset_val",
+            "sample_k_train": "training_sample_k",
+            "sample_k_val": "validation_sample_k",
+            "model1": "base_model",   # model1 -> base_model
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "lr", "weight_decay", "warmup_ratio",
+            "grad_accum_steps", "max_length",
+            "fp16",
+        ],
+    },
+
+    # ---------- GREATER ----------
+    "greater": {
+        "required": ["dataset_train", "dataset_aux1"],  # dataset_aux1 -> dataset_surrogate
+        "rename": {
+            "dataset_train": "dataset_training",
+            "dataset_aux1": "dataset_surrogate",
+            "sample_k_train": "training_sample_k",
+            "sample_k_val": "validation_sample_k",
+            "sample_k_aux1": "surrogate_sample_k",
+            "model1": "surrogate_base_model",
+            "model2": "detector_base_model",
+            "model3": "mlm_model",
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "max_length", "fp16",
+            "warmup_ratio", "weight_decay", "grad_accum_steps",
+        ],
+    },
+
+    # ---------- DeTeCtive ----------
+    "detective": {
+        "required": ["dataset_train"],
+        "rename": {
+            "dataset_train": "dataset_training",
+            "dataset_val": "dataset_validation",
+            "sample_k_train": "train_sample_limit",
+            "sample_k_val": "val_sample_limit",
+            "model1": "embedding_model",  # model1 -> embedding_model
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "lr", "weight_decay", "max_length",
+            "num_workers", "devices",
+        ],
+    },
+
+    # ---------- PECOLA ----------
+    "pecola": {
+        "required": ["dataset_train"],
+        "rename": {
+            "dataset_train": "dataset_training",
+            "dataset_val": "dataset_validation",
+            "dataset_test": "dataset_test",
+            "sample_k_train": "shot",          # ✅ NEW:  -> PECOLA shot
+            "dataset_aux1": "dataset_training_extra",  # aux1 -> training_extra
+            "sample_k_val": "validation_size",
+            "sample_k_test": "test_size",
+            "model1": "base_model",
+            "model2": "t5_model",
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "lr", "weight_decay", "warmup_ratio",
+            "grad_accum_steps", "max_length",
+            "fp16",
+        ],
+    },
+
+    # ---------- ImBD ----------
+    "imbd": {
+        "required": ["dataset_train", "dataset_val", "dataset_test"],
+        "rename": {
+            "dataset_train": "dataset_train",
+            "dataset_val": "dataset_val",
+            "dataset_test": "dataset_test",
+            "sample_k_train": "train_limit",
+            "sample_k_val": "val_limit",
+            "sample_k_test": "test_limit",
+            "model1": "base_model",
+            "model2": "reference_model",
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "lr", "weight_decay",
+        ],
+    },
+
+    # ---------- MPU ----------
+    "mpu": {
+        "required": ["dataset_train"],
+        "rename": {
+            "dataset_train": "dataset_training",
+            "dataset_val": "dataset_validation",
+            "sample_k_train": "train_sample_limit",
+            "sample_k_val": "val_sample_limit",
+            "model1": "base_model",
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "lr", "weight_decay", "warmup_ratio",
+            "max_length",
+            "num_workers",
+        ],
+    },
+
+    # ---------- Longformer ----------
+    "longformer": {
+        "required": ["dataset_train"],
+        "rename": {
+            "dataset_train": "dataset_train",
+            "dataset_val": "dataset_val",
+            "dataset_test": "dataset_test",
+            "sample_k_train": "sample_k_train",
+            "sample_k_val": "sample_k_val",
+            "sample_k_test": "sample_k_test",
+            "model1": "model",             # model1 -> longformer model dir/id
+            "tokenizer": "tokenizer_path", # tokenizer -> tokenizer_path
+        },
+        "passthrough": [
+            "output_dir", "seed",
+            "epochs", "train_batch_size", "eval_batch_size",
+            "lr", "weight_decay", "warmup_ratio",
+            "grad_accum_steps", "max_length",
+            "fp16", "device", "name",
+        ],
+    },
+}
+
+def _pick(v):
+    return None if (v is None or (isinstance(v, str) and v.strip() == "")) else v
+
+def _require_fields(det: str, common: Dict[str, Any]) -> None:
+    spec = _TRAIN_ADAPTERS.get(det, None)
+    if not spec:
+        return
+    miss = [k for k in spec.get("required", []) if _pick(common.get(k)) is None]
+    if miss:
+        raise SystemExit(f"[MGTEval][train] detector='{det}' missing required args: {', '.join(miss)}")
+
+def _adapt_train_kwargs(det: str, common: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    将统一 train 参数 common 映射到各 trainer 的真实 kwargs。
+    """
+    det_l = (det or "").lower()
+    spec = _TRAIN_ADAPTERS.get(det_l, None)
+
+    # fallback： trainer
+    if spec is None:
+        out: Dict[str, Any] = {}
+        if _pick(common.get("dataset_train")) is not None:
+            out["dataset_training"] = common["dataset_train"]
+        if _pick(common.get("dataset_val")) is not None:
+            out["dataset_val"] = common["dataset_val"]
+        if _pick(common.get("model1")) is not None:
+            out["base_model"] = common["model1"]
+        for k in ["output_dir", "seed", "epochs", "train_batch_size", "eval_batch_size", "lr", "weight_decay", "warmup_ratio", "max_length", "fp16"]:
+            if _pick(common.get(k)) is not None:
+                out[k] = common[k]
+        return out
+
+    out: Dict[str, Any] = {}
+
+    # rename
+    for src, dst in spec.get("rename", {}).items():
+        v = _pick(common.get(src))
+        if v is not None:
+            out[dst] = v
+
+    # passthrough
+    for k in spec.get("passthrough", []):
+        v = _pick(common.get(k))
+        if v is not None:
+            out[k] = v
+
+    return out
+
+def _now():
+    return time.strftime("%Y%m%d-%H%M%S")
+
+def _import_all_detectors():
+    """动态 import mgt_eval.detectors 包下所有子模块，触发 @register。"""
+    import pkgutil, importlib
+    import detectors as pkg
+    for m in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+        try:
+            importlib.import_module(m.name)
+        except Exception as e:
+            _rprint(f"[MGTEval][list] skip {m.name}: {e}")
+
+def cmd_list(_args):
+    """List available detectors with enhanced formatting."""
+    # Try to use enhanced version if available
+    try:
+        from cli_helpers import print_detector_list
+        from detectors import ensure_all_detectors_registered
+        ensure_all_detectors_registered()
+
+        try:
+            from detectors.registry import list_registered_detectors
+            dets = list_registered_detectors()
+        except Exception:
+            from detectors.registry import REGISTRY as _REG
+            dets = sorted(_REG.keys())
+
+        if not dets:
+            _rprint("(no detectors found)")
+            return
+
+        # Use enhanced list with verbose option
+        verbose = getattr(_args, 'verbose', False)
+        print_detector_list(dets, verbose=verbose)
+        return
+    except ImportError:
+        pass
+
+    # Fallback to original implementation
+    from detectors import ensure_all_detectors_registered
+    ensure_all_detectors_registered()
+
+    try:
+        from detectors.registry import list_registered_detectors
+        dets = list_registered_detectors()
+    except Exception:
+        from detectors.registry import REGISTRY as _REG
+        dets = sorted(_REG.keys())
+
+    if dets:
+        dets_sorted = sorted(dets)
+        if _HAS_RICH and _RICH_CONSOLE is not None:
+            table = Table(title="Registered Detectors", show_header=True, header_style="bold")
+            table.add_column("#", style="cyan", justify="right", width=4)
+            table.add_column("detector", style="green")
+            for i, d in enumerate(dets_sorted, start=1):
+                table.add_row(str(i), d)
+            _RICH_CONSOLE.print(table)
+        else:
+            _rprint("\n".join(dets_sorted))
+    else:
+        _rprint("(no detectors found)")
+
+def cmd_info(args):
+    """Show detailed information about a specific detector."""
+    try:
+        from cli_helpers import print_detector_info
+        detector_name = args.detector
+
+        if not detector_name:
+            _rprint("[ERROR] Detector name is required")
+            _rprint("Usage: mgteval-cli info <detector_name>")
+            sys.exit(1)
+
+        # Check if detector exists
+        from detectors import ensure_all_detectors_registered, list_registered_detectors
+        ensure_all_detectors_registered()
+        available = list_registered_detectors()
+
+        if detector_name not in available:
+            _rprint(f"[ERROR] Detector '{detector_name}' not found")
+            _rprint(f"\nAvailable detectors: {', '.join(sorted(available)[:10])}...")
+            _rprint("\nRun 'mgteval-cli list' to see all available detectors")
+            sys.exit(1)
+
+        # Print detailed info
+        print_detector_info(detector_name)
+    except ImportError:
+        _rprint("[ERROR] Enhanced CLI helpers not available")
+        _rprint("Please ensure mgt_eval is properly installed")
+        sys.exit(1)
+
+
+def cmd_examples(_args):
+    """Show usage examples for common tasks."""
+    try:
+        from cli_helpers import print_examples
+        print_examples()
+    except ImportError:
+        # Fallback to basic examples
+        _rprint("\n=== MGTEval Usage Examples ===\n")
+        _rprint("1. List all detectors:")
+        _rprint("   mgteval-cli list\n")
+        _rprint("2. Get detector info:")
+        _rprint("   mgteval-cli info binoculars\n")
+        _rprint("3. Build dataset:")
+        _rprint("   mgteval-cli build examples/build/build_dataset.yaml\n")
+        _rprint("4. Run detection:")
+        _rprint("   mgteval-cli detect examples/detect/binoculars.yaml\n")
+        _rprint("5. Calibrate detector:")
+        _rprint("   mgteval-cli calibrate --detector binoculars --data dev.jsonl --model1 gpt-neo-2.7B\n")
+
+
+def cmd_troubleshoot(_args):
+    """Show troubleshooting guide."""
+    try:
+        from cli_helpers import print_troubleshooting
+        print_troubleshooting()
+    except ImportError:
+        # Fallback to basic troubleshooting
+        _rprint("\n=== Troubleshooting ===\n")
+        _rprint("1. HuggingFace Download Issues:")
+        _rprint("   export HF_ENDPOINT=\"https://hf-mirror.com\"\n")
+        _rprint("2. GPU Out of Memory:")
+        _rprint("   Reduce --batch_size or --max_new_tokens\n")
+        _rprint("3. Tokenizer Errors:")
+        _rprint("   Try tokenizer_strategy: whitespace in YAML config\n")
+        _rprint("4. Import Errors:")
+        _rprint("   pip install torch-geometric  # For graph-based detectors")
+        _rprint("   pip install spacy && python -m spacy download en_core_web_sm\n")
+
+
+def cmd_run(args):
+    from eval.evaluator import evaluate_detector as _eval
+    from calibration.runner import _build_detector
+    import torch
+
+    _import_all_detectors()
+    logger = _get_logger()
+
+    det_name = (args.detector or "").strip()
+    det_l = det_name.lower()
+    _log_detector_citation_by_name(logger, det_l)
+
+    # evaluator/Pretrained  sample_k ：<=0 -> None
+    sample_k = None if (args.sample_k is None or int(args.sample_k) <= 0) else int(args.sample_k)
+    attack_datasets = _parse_attack_dataset_single(
+        getattr(args, "attack_dataset", None),
+        data_fallback=getattr(args, "data", None),
+    )
+    asr_save_details = bool(getattr(args, "asr_save_details", True))
+
+    # ------------------------------------------------------------
+    # Case A) HF ：openai-detector-base （ --model1）
+    # ------------------------------------------------------------
+    try:
+        from detectors.pretrained.pretrained_entrypoints import (
+            DETECTOR_MODEL_MAP,
+            evaluate_pretrained_detector,
+        )
+    except Exception:
+        DETECTOR_MODEL_MAP = {}
+        evaluate_pretrained_detector = None
+
+    if det_name in DETECTOR_MODEL_MAP:
+        if evaluate_pretrained_detector is None:
+            raise SystemExit("[MGTEval][run] pretrained entrypoints not available in this environment.")
+
+        evaluate_pretrained_detector(
+            detector_key=det_name,
+            dataset=args.data,                    # spec/path  evaluator
+            device=args.device,
+            batch_size=int(args.batch_size),
+            max_length=int(getattr(args, "max_length", 512)),
+            fp16=bool(getattr(args, "fp16", False)),
+            threshold=float(args.threshold),
+            sample_k=sample_k,
+            sample_seed=int(args.seed),
+            group_cols=None,
+            out_dir=args.out,
+            save_curves=bool(getattr(args, "save_curves", True)),
+            k_runs=int(getattr(args, "k_runs", 1)),
+            attack_datasets=attack_datasets,
+            asr_save_details=asr_save_details,
+            show_progress=(not args.no_progress),
+        )
+        return
+    # ------------------------------------------------------------
+    # Case Detective) embedding KNN inference (NOT seqcls)
+    # ------------------------------------------------------------
+    if det_l == "detective":
+        from detectors.pretrained.pretrained import PretrainedDetector
+
+        # ： model1/model2（）
+        train_dataset = getattr(args, "train_dataset", None)
+        embedding_model_name = getattr(args, "embedding_model_name", None) or getattr(args, "model2", None)
+        embedding_ckpt_raw = getattr(args, "embedding_ckpt_path", None)
+        if _is_null_like(embedding_ckpt_raw):
+            embedding_ckpt_raw = getattr(args, "model1", None)
+        resolved_ckpt = _resolve_detective_embedding_ckpt(
+            detector_name=det_l,
+            ckpt_path=embedding_ckpt_raw,
+            model1_keyword=getattr(args, "model1_keyword", None),
+            model1_search_root=getattr(args, "model1_search_root", None),
+        )
+        embedding_ckpt_path = resolved_ckpt.get("resolved")
+
+        if not train_dataset:
+            raise SystemExit("[MGTEval][detective] missing --train_dataset (e.g., train.jsonl,dev.jsonl).")
+        if not embedding_model_name:
+            raise SystemExit("[MGTEval][detective] missing --embedding_model_name (or use --model2).")
+        if not embedding_ckpt_path:
+            searched = [p for p in resolved_ckpt.get("searched_roots", []) if os.path.isdir(str(p))]
+            searched_msg = ", ".join(searched) if searched else "(none)"
+            raise SystemExit(
+                "[MGTEval][detective] missing --embedding_ckpt_path and auto-resolve failed.\n"
+                f"keyword='{resolved_ckpt.get('keyword')}', searched_roots=[{searched_msg}].\n"
+                "Please set --embedding_ckpt_path/--model1 explicitly, or set --model1_search_root."
+            )
+        if bool(resolved_ckpt.get("auto_used", False)):
+            _rprint(f"[MGTEval][detective] Auto-resolved embedding_ckpt_path -> {embedding_ckpt_path}")
+
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        use_standard_eval = bool(getattr(args, "detective_eval", False))
+        if use_standard_eval:
+            det = PretrainedDetector(
+                model_path=embedding_model_name,
+                name=det_name,
+                device=device,
+                max_length=int(getattr(args, "max_length", 512)),
+                fp16=bool(getattr(args, "fp16", False)) and str(device).startswith("cuda"),
+                knn_train_dataset=train_dataset,
+                knn_embedding_model_name=embedding_model_name,
+                knn_embedding_ckpt_path=embedding_ckpt_path,
+                knn_pooling=getattr(args, "pooling", "average"),
+                knn_K=int(getattr(args, "max_K", 5)),
+                knn_backend=str(getattr(args, "knn_backend", "torch")).lower(),
+                knn_cache_root=args.cache_root,
+                knn_index_name=args.index_name,
+                knn_reuse_database=args.reuse_database,
+                knn_save_database=args.save_database,
+                knn_use_gpu_index=args.use_gpu_index,
+                knn_index_batch_size=int(getattr(args, "index_batch_size", 8)),
+            )
+            _eval(
+                detector=det,
+                dataset=args.data,
+                batch_size=int(args.batch_size),
+                threshold=float(args.threshold),
+                show_progress=(not args.no_progress),
+                out_dir=args.out,
+                save_curves=bool(getattr(args, "save_curves", True)),
+                k_runs=int(getattr(args, "k_runs", 1)),
+                attack_datasets=attack_datasets,
+                asr_save_details=asr_save_details,
+                sample_k=sample_k,
+                sample_seed=int(args.seed),
+                group_cols=None,
+            )
+            return
+
+        det = PretrainedDetector(
+            device=device,
+            max_length=int(getattr(args, "max_length", 512)),
+            fp16=bool(getattr(args, "fp16", False)) and str(device).startswith("cuda"),
+        )
+        sample_k_train = getattr(args, "sample_k_train", None)
+        sample_k_test = getattr(args, "sample_k_test", None)
+        sample_k_train = None if (sample_k_train is None or int(sample_k_train) <= 0) else int(sample_k_train)
+        if sample_k_test is None:
+            sample_k_test = sample_k
+        sample_k_test = None if (sample_k_test is None or int(sample_k_test) <= 0) else int(sample_k_test)
+        res = det.embedding_knn_infer(
+            train_dataset=train_dataset,
+            test_dataset=args.data,
+            embedding_model_name=embedding_model_name,
+            embedding_ckpt_path=embedding_ckpt_path,
+            pooling=getattr(args, "pooling", "average"),
+            batch_size=int(args.batch_size),
+            max_K=int(getattr(args, "max_K", 5)),
+            cache_root=args.cache_root,
+            save_dataset=args.save_dataset,
+            save_database=args.save_database,
+            reuse_database=args.reuse_database,
+            index_name=args.index_name,
+            sample_k_train=sample_k_train,
+            sample_k_test=sample_k_test,
+            use_gpu_index=args.use_gpu_index,
+            return_probs=args.return_probs,
+            seed=int(args.seed),
+            index_batch_size=int(getattr(args, "index_batch_size", 8)),
+            knn_backend=str(getattr(args, "knn_backend", "torch")).lower(),   # ✅ NEW
+        )
+
+        # CLI ： best_K / best_metrics
+        _rprint("best K =", res.get("best_K"))
+        _rprint("best metrics =", res.get("best_metrics"))
+
+        # ：--out  json
+        if getattr(args, "out", None):
+            out_path = args.out
+            if (out_path.endswith("/") or os.path.isdir(out_path)):
+                os.makedirs(out_path, exist_ok=True)
+                out_file = os.path.join(out_path, "detective_embedding_knn.json")
+            else:
+                os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+                out_file = out_path
+            with open(out_file, "w", encoding="utf-8") as f:
+                json.dump(res, f, ensure_ascii=False, indent=2)
+
+        return
+
+    # ------------------------------------------------------------
+    # Case B) “coco/mpu/longformer/...” ： Pretrained(SeqCls/LoRA)  checkpoint
+    # - ：--detector （ coco），--model1  checkpoint
+    # - ：--lora_dir + --base  LoRA
+    # ------------------------------------------------------------
+    FINETUNED_SEQCLS_NAMES = {
+        "coco", "mpu", "longformer", "greater", "imbd", "pecola",
+        "hfcls", "seqcls", "pretrained",
+        # “ SeqCls checkpoint” detector
+    }
+
+    if det_l in FINETUNED_SEQCLS_NAMES:
+        from detectors import Pretrained  # quickstart_simpleai
+
+        # LoRA
+        if getattr(args, "lora_dir", None):
+            if not getattr(args, "ckpt_base", None):
+                raise SystemExit("[MGTEval][run] using --lora_dir requires --base/--ckpt_base.")
+            model_path = args.lora_dir
+            tokenizer_path = args.tokenizer or args.ckpt_base
+            extra_kwargs = {"ckpt_base": args.ckpt_base, "fp16": bool(args.fp16)}
+        # checkpoint /
+        else:
+            resolved = _resolve_detect_seqcls_model1(
+                detector_name=det_l,
+                model1=getattr(args, "model1", None),
+                model1_keyword=getattr(args, "model1_keyword", None),
+                model1_search_root=getattr(args, "model1_search_root", None),
+            )
+            model_path = resolved.get("resolved")
+            if not model_path:
+                searched = [p for p in resolved.get("searched_roots", []) if os.path.isdir(str(p))]
+                searched_msg = ", ".join(searched) if searched else "(none)"
+                raise SystemExit(
+                    "[MGTEval][run] missing --model1 and auto-resolve failed.\n"
+                    f"detector='{det_name}', keyword='{resolved.get('keyword')}', searched_roots=[{searched_msg}].\n"
+                    "Please set --model1 explicitly, or set --model1_search_root."
+                )
+
+            if bool(resolved.get("auto_used", False)):
+                _rprint(f"[MGTEval][run] Auto-resolved model1 -> {model_path}")
+            elif str(getattr(args, "model1", "")).strip() != str(model_path):
+                _rprint(f"[MGTEval][run] Resolved model1 from run dir -> {model_path}")
+
+            tok_raw = getattr(args, "tokenizer", None)
+            tokenizer_path = model_path if _is_null_like(tok_raw) else tok_raw
+            extra_kwargs = {"fp16": bool(args.fp16)}
+            if getattr(args, "ckpt_base", None):
+                extra_kwargs["ckpt_base"] = args.ckpt_base
+
+        # Pretrained(...)： evaluator  summary/curves
+        Pretrained(
+            data=args.data,
+            sample_k=sample_k,
+            batch_size=int(args.batch_size),
+            threshold=float(args.threshold),
+            model_path=model_path,
+            out_dir=args.out,
+            tokenizer_path=tokenizer_path,
+            max_length=int(getattr(args, "max_length", 512)),
+            name=det_name,
+            show_progress=(not args.no_progress),
+            k_runs=int(getattr(args, "k_runs", 1)),
+            save_curves=bool(getattr(args, "save_curves", True)),
+            attack_datasets=attack_datasets,
+            asr_save_details=asr_save_details,
+            **extra_kwargs,
+        )
+        return
+
+    # ------------------------------------------------------------
+    # Case C) ： detector （_build_detector + evaluator）
+    # ------------------------------------------------------------
+    if not getattr(args, "model1", None):
+        raise SystemExit(
+            f"[MGTEval][run] detector='{det_name}' requires --model1 in logic-detector mode.\n"
+            "If you meant a finetuned seqcls checkpoint, use --detector coco/mpu/longformer (or add it to FINETUNED_SEQCLS_NAMES).\n"
+            "If you meant a builtin HF alias, use --detector openai-detector-base/... without --model1."
+        )
+
+    _dk = _parse_detector_kwargs(args.detector_kwargs, who="run")
+    _dk = _apply_vllm_kwargs(args, _dk)
+    det = _build_detector(
+        detector_name=args.detector,
+        model1=args.model1,
+        model2=args.model2,
+        device=args.device,
+        use_bfloat16=bool(args.bf16),
+        detector_kwargs=_dk,
+        basemodel=args.basemodel,
+        bart_ckpt=args.bart_ckpt,
+    )
+
+    _eval(
+        detector=det,
+        dataset=args.data,
+        batch_size=int(args.batch_size),
+        threshold=float(args.threshold),
+        show_progress=(not args.no_progress),
+        out_dir=args.out,
+        save_curves=bool(getattr(args, "save_curves", True)),
+        k_runs=int(getattr(args, "k_runs", 1)),
+        attack_datasets=attack_datasets,
+        asr_save_details=asr_save_details,
+        sample_k=sample_k,                # ✅  evaluator
+        sample_seed=int(args.seed),
+        group_cols=None,
+    )
+
+def _parse_detector_kwargs(detector_kwargs: Any, *, who: str) -> Optional[Dict[str, Any]]:
+    if detector_kwargs is None:
+        return None
+    if isinstance(detector_kwargs, dict):
+        return detector_kwargs
+    try:
+        parsed = json.loads(detector_kwargs)
+        if not isinstance(parsed, dict):
+            raise ValueError("detector_kwargs JSON must be an object/dict.")
+        return parsed
+    except Exception as e:
+        raise SystemExit(f"[MGTEval][{who}] Failed to parse --detector_kwargs as JSON: {e}")
+
+def cmd_calibrate(args):
+    from calibration.runner import Calibrate as _calibrate
+    _import_all_detectors()
+    _ = _calibrate(
+        detector=args.detector,
+        model1=args.model1,
+        model2=args.model2,
+        data=args.data,
+        batch_size=int(args.batch_size),
+        sample_k=(int(args.sample_k) if args.sample_k is not None else None),
+        seed=int(args.seed),
+        device=args.device,
+        bf16=bool(args.bf16),
+        detector_kwargs=_parse_detector_kwargs(args.detector_kwargs, who="calibrate"),
+        basemodel=args.basemodel,
+        bart_ckpt=args.bart_ckpt,
+        calibrator_name=args.calibrator_name,
+        l2=float(args.l2),
+        max_iter=int(args.max_iter),
+        tol=float(args.tol),
+        standardize=not args.no_standardize,
+        mode=args.mode,                 # NEW:
+        out=args.out,
+        out_dir=args.out_dir,
+        show_progress=(not args.no_progress),
+    )
+
+def cmd_build(args):
+    _run_dataset_builder(args, force_attack_only=False)
+
+def cmd_attack(args):
+    _run_dataset_builder(args, force_attack_only=True)
+
+def cmd_train(args):
+    from detectors import ensure_all_detectors_registered
+    ensure_all_detectors_registered()
+    logger = _get_logger()
+    _log_yaml_if_any(logger, args)
+
+    # 1)  train_kwargs JSON（trainer ），
+    extra: Dict[str, Any] = {}
+    if getattr(args, "train_kwargs", None) is not None:
+        if isinstance(args.train_kwargs, dict):
+            extra = args.train_kwargs
+        else:
+            try:
+                extra = json.loads(args.train_kwargs)
+                if not isinstance(extra, dict):
+                    raise ValueError("train_kwargs JSON must be an object/dict.")
+            except Exception as e:
+                raise SystemExit(f"[MGTEval][train] Failed to parse --train_kwargs as JSON: {e}")
+
+    # 2)  common
+    common: Dict[str, Any] = dict(
+        detector=(args.detector or "").strip(),
+        dataset_train=getattr(args, "dataset_train", None),
+        dataset_val=getattr(args, "dataset_val", None),
+        dataset_test=getattr(args, "dataset_test", None),
+        dataset_aux1=getattr(args, "dataset_aux1", None),
+        dataset_aux2=getattr(args, "dataset_aux2", None),
+        sample_k_train=getattr(args, "sample_k_train", None),
+        sample_k_val=getattr(args, "sample_k_val", None),
+        sample_k_test=getattr(args, "sample_k_test", None),
+        sample_k_aux1=getattr(args, "sample_k_aux1", None),
+        sample_k_aux2=getattr(args, "sample_k_aux2", None),
+        model1=getattr(args, "model1", None),
+        model2=getattr(args, "model2", None),
+        model3=getattr(args, "model3", None),
+        tokenizer=getattr(args, "tokenizer", None),
+
+        output_dir=getattr(args, "output_dir", None),
+        seed=getattr(args, "seed", None),
+        epochs=getattr(args, "epochs", None),
+        train_batch_size=getattr(args, "train_batch_size", None),
+        eval_batch_size=getattr(args, "eval_batch_size", None),
+        lr=getattr(args, "lr", None),
+        weight_decay=getattr(args, "weight_decay", None),
+        warmup_ratio=getattr(args, "warmup_ratio", None),
+        grad_accum_steps=getattr(args, "grad_accum_steps", None),
+        max_length=getattr(args, "max_length", None),
+        fp16=getattr(args, "fp16", None),
+        num_workers=getattr(args, "num_workers", None),
+        device=getattr(args, "device", None),
+        name=getattr(args, "name", None),
+    )
+    _log_train_config(logger, common, extra)
+    _log_detector_citation_by_name(logger, common.get("detector") or "")
+
+    det_raw = common["detector"].strip()
+
+    # hf:  HF ， trainer
+    force_hf = False
+    if det_raw.lower().startswith("hf:"):
+        force_hf = True
+        det_raw = det_raw[3:].strip()
+
+    det_l = det_raw.lower()
+
+    # ---------------------------
+    # helper: resolve nested keys from trainer result
+    # ---------------------------
+    def _deep_get(d: Any, path: List[str]) -> Any:
+        cur = d
+        for k in path:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(k, None)
+        return cur
+
+    def _pick_from_result(result: Any, keys: List[str]) -> Any:
+        """
+        Try multiple common nesting patterns:
+          - top-level: result[key]
+          - result["train"][key]
+          - result["train"]["train"][key]
+          - result["raw"][key]
+          - result["raw"]["train"][key]
+        """
+        if not isinstance(result, dict):
+            return None
+        candidates = []
+        for k in keys:
+            candidates.extend([
+                [k],
+                ["train", k],
+                ["train", "train", k],
+                ["raw", k],
+                ["raw", "train", k],
+            ])
+        for p in candidates:
+            v = _deep_get(result, p)
+            if v is not None:
+                return v
+        return None
+
+    def _is_valid_dir(p: Any) -> bool:
+        try:
+            return bool(p) and os.path.isdir(str(p))
+        except Exception:
+            return False
+
+    def _norm_int(v, default=None):
+        if v is None:
+            return default
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    def _norm_float(v, default=None):
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    def _pick(*vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    def _fmt_count(v):
+        if v is None:
+            return "unknown"
+        try:
+            return _color_num(int(v))
+        except Exception:
+            return str(v)
+
+    def _extract_counts_from_result(result: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(result, dict):
+            return None
+        # 1) split_sizes
+        for p in (["split_sizes"], ["train", "split_sizes"], ["raw", "split_sizes"], ["train", "train", "split_sizes"]):
+            v = _deep_get(result, p)
+            if isinstance(v, dict) and any(k in v for k in ("train", "val", "test")):
+                return {"train": v.get("train"), "val": v.get("val"), "test": v.get("test")}
+        # 2) train_size/val_size/test_size
+        for p in ([], ["train"], ["raw"], ["train", "train"], ["raw", "train"]):
+            d = _deep_get(result, p)
+            if isinstance(d, dict) and any(k in d for k in ("train_size", "val_size", "test_size")):
+                return {"train": d.get("train_size"), "val": d.get("val_size"), "test": d.get("test_size")}
+        return None
+
+    def _extract_counts_from_json(path: str) -> Optional[Dict[str, Any]]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+        except Exception:
+            return None
+        data = obj.get("data", None) if isinstance(obj, dict) else None
+        if isinstance(data, dict):
+            num = data.get("num_examples")
+            if isinstance(num, dict):
+                return {"train": num.get("train"), "val": num.get("val"), "test": num.get("test")}
+        return None
+
+    def _extract_actual_counts(result: Any, train_run_dir: Optional[str]) -> Optional[Dict[str, Any]]:
+        counts = _extract_counts_from_result(result)
+        if counts:
+            return counts
+        cand_paths: List[str] = []
+        for art in (
+            result.get("artifacts") if isinstance(result, dict) else None,
+            _deep_get(result, ["train", "artifacts"]),
+            _deep_get(result, ["raw", "artifacts"]),
+            _deep_get(result, ["train", "train", "artifacts"]),
+        ):
+            if isinstance(art, dict):
+                for k in ("summary_json", "args_json", "train_summary_json", "train_args_json"):
+                    p = art.get(k)
+                    if p:
+                        cand_paths.append(str(p))
+        if train_run_dir:
+            cand_paths.extend([
+                os.path.join(train_run_dir, "train_summary.json"),
+                os.path.join(train_run_dir, "train_args.json"),
+            ])
+        for p in cand_paths:
+            if p and os.path.isfile(p):
+                counts = _extract_counts_from_json(p)
+                if counts:
+                    return counts
+        return None
+
+    def _deep_merge_dict(base: Any, override: Any) -> Any:
+        if isinstance(base, dict) and isinstance(override, dict):
+            merged = dict(base)
+            for k, v in override.items():
+                merged[k] = _deep_merge_dict(merged.get(k), v)
+            return merged
+        return override
+
+    def _merge_with_existing_summary(path: str, payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        if not path or (not os.path.isfile(path)):
+            return payload
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            if isinstance(existing, dict):
+                return _deep_merge_dict(existing, payload)
+        except Exception:
+            return payload
+        return payload
+
+    # ---------------------------
+    # Auto-eval helper (run detect once after training)
+    # ---------------------------
+    def _auto_eval_detect_once(
+        *,
+        detector_name_for_eval: str,
+        ckpt_dir: str,
+        test_spec: str,
+        test_sample_k: Optional[int],
+        train_run_dir: str,
+        batch_size: int,
+        device: Optional[str],
+        fp16: bool,
+        max_length: int,
+        threshold: float = 0.5,
+        save_curves: bool = True,
+        eval_prefix: str = "eval_test",
+    ) -> Optional[str]:
+        """
+        Run a detect-style evaluation (Pretrained entrypoint) and save under:
+          {train_run_dir}/{eval_prefix}_{timestamp}/metrics/summary.json
+        Return eval_out_dir if succeeded, else None.
+        """
+        try:
+            from detectors import Pretrained
+
+            # ckpt ：eval_test_YYYYMMDD-HHMMSS
+            eval_out_dir = os.path.join(train_run_dir, f"{eval_prefix}_{_now()}")
+            sample_k_eval = None
+            if test_sample_k is not None and int(test_sample_k) > 0:
+                sample_k_eval = int(test_sample_k)
+
+            Pretrained(
+                data=test_spec,
+                sample_k=sample_k_eval,
+                batch_size=int(batch_size),
+                threshold=float(threshold),
+                model_path=ckpt_dir,
+                out_dir=eval_out_dir,
+                tokenizer_path=ckpt_dir,              # tokenizer follows ckpt (best/last)
+                max_length=int(max_length),
+                name=str(detector_name_for_eval),
+                show_progress=True,
+                k_runs=1,
+                save_curves=bool(save_curves),
+                attack_datasets=None,
+                asr_save_details=True,
+                device=device,
+                fp16=bool(fp16),
+            )
+            return eval_out_dir
+        except Exception as e:
+            _rprint(f"[MGTEval][train] Warning: auto-eval (detect) failed: {e}", style="yellow")
+            return None
+
+    # ---------------------------
+    # Metric detector path: use calibrate as the "train" behavior
+    # ---------------------------
+    if (not force_hf) and _is_metric_detector(det_l):
+        from calibration.runner import Calibrate as _calibrate
+
+        data = _pick(getattr(args, "data", None), common.get("dataset_train"))
+        if not data:
+            raise SystemExit("[MGTEval][train] metric detector requires --data/--dataset_train for calibration.")
+
+        model1 = _pick(common.get("model1"), getattr(args, "score_model", None))
+        if not model1:
+            raise SystemExit("[MGTEval][train] metric detector requires --model1 for calibration.")
+
+        model2 = _pick(common.get("model2"), getattr(args, "reference_model", None))
+
+        sample_k = _pick(getattr(args, "sample_k", None), common.get("sample_k_train"))
+        if sample_k is not None and int(sample_k) <= 0:
+            sample_k = None
+        if sample_k is None:
+            sample_k = 10000
+
+        batch_size = _pick(getattr(args, "batch_size", None),
+                           common.get("train_batch_size"),
+                           common.get("eval_batch_size"),
+                           32)
+
+        raw_dk = _pick(getattr(args, "detector_kwargs", None),
+                       extra.get("detector_kwargs") if isinstance(extra, dict) else None)
+        detector_kwargs = _parse_detector_kwargs(raw_dk, who="train")
+        # Training-stage calibration: do NOT auto-load packaged calibrators.
+        if detector_kwargs is None:
+            detector_kwargs = {}
+        detector_kwargs["auto_calibrate"] = False
+        detector_kwargs["force_runner_calibration"] = False
+        detector_kwargs = _apply_vllm_kwargs(args, detector_kwargs)
+        basemodel = _pick(getattr(args, "basemodel", None),
+                          extra.get("basemodel") if isinstance(extra, dict) else None)
+        bart_ckpt = _pick(getattr(args, "bart_ckpt", None),
+                          extra.get("bart_ckpt") if isinstance(extra, dict) else None)
+
+        calibrator_name = _pick(getattr(args, "calibrator_name", None),
+                                extra.get("calibrator_name") if isinstance(extra, dict) else None,
+                                "platt_lr")
+        l2 = _pick(getattr(args, "l2", None),
+                   extra.get("l2") if isinstance(extra, dict) else None,
+                   1e-2)
+        max_iter = _pick(getattr(args, "max_iter", None),
+                         extra.get("max_iter") if isinstance(extra, dict) else None,
+                         200)
+        tol = _pick(getattr(args, "tol", None),
+                    extra.get("tol") if isinstance(extra, dict) else None,
+                    1e-6)
+        no_standardize = _pick(getattr(args, "no_standardize", None),
+                               extra.get("no_standardize") if isinstance(extra, dict) else None,
+                               False)
+        mode = _pick(getattr(args, "mode", None),
+                     extra.get("mode") if isinstance(extra, dict) else None,
+                     "acc")
+
+        out = _pick(getattr(args, "out", None),
+                    extra.get("out") if isinstance(extra, dict) else None)
+        out_dir = _pick(getattr(args, "out_dir", None),
+                        extra.get("out_dir") if isinstance(extra, dict) else None)
+        if out is None and out_dir is None and common.get("output_dir"):
+            od = str(common.get("output_dir"))
+            if od.lower().endswith((".json", ".jsonl")):
+                out = od
+            else:
+                out_dir = od
+
+        no_progress = _pick(getattr(args, "no_progress", None),
+                            extra.get("no_progress") if isinstance(extra, dict) else None,
+                            False)
+        bf16 = _pick(getattr(args, "bf16", None),
+                     extra.get("bf16") if isinstance(extra, dict) else None,
+                     True)
+
+        logger.info(
+            "Calibrate config: %s",
+            json.dumps(
+                {
+                    "detector": det_l,
+                    "model1": model1,
+                    "model2": model2,
+                    "data": data,
+                    "batch_size": batch_size,
+                    "sample_k": sample_k,
+                    "seed": common.get("seed"),
+                    "device": common.get("device"),
+                    "bf16": bool(bf16),
+                    "calibrator_name": calibrator_name,
+                    "l2": l2,
+                    "max_iter": max_iter,
+                    "tol": tol,
+                    "standardize": (not bool(no_standardize)),
+                    "mode": mode,
+                    "out": out,
+                    "out_dir": out_dir,
+                    "detector_kwargs": detector_kwargs,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
+        _ = _calibrate(
+            detector=det_l,
+            model1=model1,
+            model2=model2,
+            data=data,
+            batch_size=int(batch_size),
+            sample_k=(int(sample_k) if sample_k is not None else None),
+            seed=int(common.get("seed") or 114514),
+            device=common.get("device"),
+            bf16=bool(bf16),
+            detector_kwargs=detector_kwargs,
+            basemodel=basemodel,
+            bart_ckpt=bart_ckpt,
+            calibrator_name=str(calibrator_name),
+            l2=float(l2),
+            max_iter=int(max_iter),
+            tol=float(tol),
+            standardize=(not bool(no_standardize)),
+            mode=str(mode),
+            out=out,
+            out_dir=out_dir,
+            show_progress=(not bool(no_progress)),
+        )
+        return
+
+    # ---------------------------
+    # Trainer path (registered)
+    # ---------------------------
+    if (not force_hf) and _has_trainer(det_l):
+        # We don't know real sizes here; print requested sample_k for visibility.
+        _rprint(
+            "[MGTEval][train] Requested sample_k: "
+            f"train={_fmt_sample_k(common.get('sample_k_train'))}, "
+            f"val={_fmt_sample_k(common.get('sample_k_val'))}, "
+            f"test={_fmt_sample_k(common.get('sample_k_test'))}, "
+            f"aux1={_fmt_sample_k(common.get('sample_k_aux1'))}, "
+            f"aux2={_fmt_sample_k(common.get('sample_k_aux2'))}"
+        )
+        from train.registry import get_trainer
+        trainer = get_trainer(det_l)
+
+        _require_fields(det_l, {**common, "detector": det_l})
+        adapted = _adapt_train_kwargs(det_l, {**common, "detector": det_l})
+
+        train_kwargs: Dict[str, Any] = dict(extra)
+        train_kwargs.update(adapted)
+
+        result = trainer(**train_kwargs)
+
+        # -------- resolve dirs robustly (fix your PECOLA case) --------
+        best_dir = _pick_from_result(result, ["best_dir", "best_model_dir", "model_dir"])
+        last_dir = _pick_from_result(result, ["last_dir", "model_dir"])
+        run_dir  = _pick_from_result(result, ["run_dir", "output_root", "output_dir"])
+        # choose train_run_dir
+        train_run_dir = None
+        if _is_valid_dir(run_dir):
+            train_run_dir = str(run_dir)
+        elif _is_valid_dir(best_dir):
+            train_run_dir = os.path.dirname(str(best_dir))
+        elif _is_valid_dir(last_dir):
+            train_run_dir = os.path.dirname(str(last_dir))
+        else:
+            # fallback: user provided output_dir (may be a root)
+            train_run_dir = train_kwargs.get("output_dir") or train_kwargs.get("out_dir") or "runs_train"
+
+        os.makedirs(train_run_dir, exist_ok=True)
+
+        # （ result ）
+        train_summary_path = os.path.join(train_run_dir, "train_summary.json")
+        try:
+            merged_summary = _merge_with_existing_summary(train_summary_path, result)
+            with open(train_summary_path, "w", encoding="utf-8") as f:
+                json.dump(merged_summary, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            _rprint(f"[MGTEval][train] Warning: failed to write train_summary.json: {e}", style="yellow")
+
+        # -------- actual sample counts (if available) --------
+        actual_counts = _extract_actual_counts(result, train_run_dir)
+        if actual_counts:
+            _rprint(
+                "[MGTEval][train] Actual samples: "
+                f"train={_fmt_count(actual_counts.get('train'))}, "
+                f"val={_fmt_count(actual_counts.get('val'))}, "
+                f"test={_fmt_count(actual_counts.get('test'))}"
+            )
+
+        # -------- optional auto-eval on dataset_test --------
+        test_spec = common.get("dataset_test")
+        if test_spec:
+            ckpt_dir = None
+
+            if _is_valid_dir(best_dir):
+                ckpt_dir = str(best_dir)
+            elif _is_valid_dir(last_dir):
+                ckpt_dir = str(last_dir)
+            else:
+                # try conventional placements
+                cand_best = os.path.join(train_run_dir, "best")
+                cand_last = os.path.join(train_run_dir, "last")
+                if os.path.isdir(cand_best):
+                    ckpt_dir = cand_best
+                elif os.path.isdir(cand_last):
+                    ckpt_dir = cand_last
+
+            if ckpt_dir:
+                bs   = _norm_int(common.get("eval_batch_size"), 32) or 32
+                ml   = _norm_int(common.get("max_length"), 512) or 512
+                dev  = common.get("device", None)
+                fp16 = bool(common.get("fp16", False))
+
+                eval_out_dir = _auto_eval_detect_once(
+                    detector_name_for_eval=det_l,
+                    ckpt_dir=ckpt_dir,
+                    test_spec=str(test_spec),
+                    test_sample_k=common.get("sample_k_test"),
+                    train_run_dir=train_run_dir,
+                    batch_size=bs,
+                    device=dev,
+                    fp16=fp16,
+                    max_length=ml,
+                    threshold=0.5,
+                    save_curves=True,
+                    eval_prefix="eval_test",
+                )
+                if eval_out_dir:
+                    _rprint(f"[MGTEval][train] Auto-eval saved to: {eval_out_dir}")
+            else:
+                _rprint("[MGTEval][train] Warning: no ckpt_dir found for auto-eval.", style="yellow")
+        # -------- cleanup: remove empty non-timestamp output_dir (if created by fallback) --------
+        base_out = train_kwargs.get("output_dir")
+        try:
+            if base_out:
+                base_out = os.path.abspath(str(base_out))
+                tr_dir = os.path.abspath(str(train_run_dir))
+                # base_out !=  run dir  base_out
+                if base_out != tr_dir and os.path.isdir(base_out) and len(os.listdir(base_out)) == 0:
+                    os.rmdir(base_out)
+                    _rprint(f"[MGTEval][train] Removed empty folder: {base_out}")
+        except Exception as e:
+            _rprint(f"[MGTEval][train] Warning: failed to remove empty output_dir: {e}", style="yellow")
+
+        return
+    # _resolve_hf_id_or_path  normalize
+    HF_ALIAS = {
+        "openai-detector-base": "openai-community/roberta-base-openai-detector",
+        "openai-detector-large": "openai-community/roberta-large-openai-detector",
+        "simpleai-detector": "Hello-SimpleAI/chatgpt-detector-roberta",
+        "radar": "TrustSafeAI/RADAR-Vicuna-7B",
+    }
+
+    # Use the normalized detector string (strip optional hf: prefix) for HF path
+    det_raw = HF_ALIAS.get(det_raw.lower(), det_raw)
+    # ---------------------------
+    # HF finetune fallback path
+    # ---------------------------
+    hf_id = _resolve_hf_id_or_path(det_raw)
+    base_model = common["model1"] or hf_id
+    tok_name = common["tokenizer"] or base_model
+    # Normalize optional hf: prefix on base/tokenizer too
+    base_model = _resolve_hf_id_or_path(base_model)
+    tok_name = _resolve_hf_id_or_path(tok_name)
+
+    import torch
+    import torch.nn as nn
+    from data_utils.load import load_dataset_unified
+    from train.train import train_model as _train_seqcls_model
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoConfig, AutoModel
+
+    seed = int(common["seed"] or 42)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    out_root = common["output_dir"] or "runs_hfcls"
+    run_dir = os.path.join(out_root, f"hfcls_{_safe_tag(hf_id)}_{_now()}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # -------- load datasets + apply sample_k ( train/val ) --------
+    train_k = common["sample_k_train"]
+    val_k = common["sample_k_val"]
+
+    if common["dataset_val"]:
+        train_examples, _ = load_dataset_unified(
+            dataset=common["dataset_train"],
+            sample_k=(None if train_k is None else int(train_k)),
+            sample_seed=seed,
+            group_cols=None,
+        )
+        val_examples, _ = load_dataset_unified(
+            dataset=common["dataset_val"],
+            sample_k=(None if val_k is None else int(val_k)),
+            sample_seed=seed,
+            group_cols=None,
+        )
+    else:
+        total_k = None
+        if train_k is not None and val_k is not None:
+            total_k = int(train_k) + int(val_k)
+        elif train_k is not None:
+            total_k = int(train_k)
+
+        all_examples, _ = load_dataset_unified(
+            dataset=common["dataset_train"],
+            sample_k=(None if total_k is None else int(total_k)),
+            sample_seed=seed,
+            group_cols=None,
+        )
+
+        vk = int(val_k) if val_k is not None else max(1, int(round(0.1 * len(all_examples))))
+        tk = int(train_k) if train_k is not None else max(0, len(all_examples) - vk)
+        train_examples, val_examples = _stratified_split_exact(all_examples, tk, vk, seed)
+
+    # -------- load test dataset (optional) --------
+    test_examples = None
+    if common.get("dataset_test"):
+        test_k = common.get("sample_k_test", None)
+        test_examples, _ = load_dataset_unified(
+            dataset=common["dataset_test"],
+            sample_k=(None if test_k is None else int(test_k)),
+            sample_seed=seed,
+            group_cols=None,
+        )
+
+    # --- print actual sample sizes (HF fallback) ---
+    try:
+        _rprint(
+            "[MGTEval][train] Loaded samples: "
+            f"train={_color_num(len(train_examples))}, "
+            f"val={_color_num(len(val_examples))}, "
+            f"test={_color_num(len(test_examples) if test_examples is not None else 0)}"
+        )
+    except Exception:
+        pass
+
+    # -------- build tokenizer/model --------
+    trust = bool(getattr(args, "trust_remote_code", False)) or bool(extra.get("trust_remote_code", False))
+    num_labels = int(extra.get("num_labels", 2))
+
+    tokenizer = AutoTokenizer.from_pretrained(tok_name, use_fast=True, trust_remote_code=trust)
+    tokenizer.padding_side = "right"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token or tokenizer.sep_token or tokenizer.cls_token
+
+    cfg_hf = AutoConfig.from_pretrained(base_model, trust_remote_code=trust)
+
+    class _HFBackboneClsWrapper(nn.Module):
+        """AutoModel + linear head fallback when AutoModelForSequenceClassification fails."""
+        def __init__(self, backbone, hidden_size: int, num_labels: int = 2, dropout: float = 0.1):
+            super().__init__()
+            self.backbone = backbone
+            self.dropout = nn.Dropout(dropout)
+            self.classifier = nn.Linear(hidden_size, num_labels)
+
+        def forward(self, input_ids=None, attention_mask=None, **kwargs):
+            out = self.backbone(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+            h = out.last_hidden_state  # [B,T,H]
+            if attention_mask is not None:
+                idx = attention_mask.long().sum(dim=1) - 1
+                idx = idx.clamp(min=0)
+            else:
+                idx = torch.full((h.size(0),), h.size(1) - 1, device=h.device, dtype=torch.long)
+            pooled = h[torch.arange(h.size(0), device=h.device), idx]  # last non-pad token
+            logits = self.classifier(self.dropout(pooled))
+            return SimpleNamespace(logits=logits)
+
+    try:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            base_model, num_labels=num_labels, trust_remote_code=trust
+        )
+        model_kind = "auto_seqcls"
+    except Exception:
+        backbone = AutoModel.from_pretrained(base_model, trust_remote_code=trust)
+        hidden = _infer_hidden_size(cfg_hf)
+        drop = float(getattr(cfg_hf, "hidden_dropout_prob", 0.1))
+        model = _HFBackboneClsWrapper(backbone, hidden_size=hidden, num_labels=num_labels, dropout=drop)
+        model_kind = "wrapped_backbone"
+
+    try:
+        n_params = int(sum(p.numel() for p in model.parameters()))
+        logger.info("HF model params: %s", _color_num(n_params))
+    except Exception:
+        logger.info("HF model params: unknown")
+
+    if getattr(model, "config", None) is not None:
+        if getattr(model.config, "pad_token_id", None) is None and tokenizer.pad_token_id is not None:
+            model.config.pad_token_id = tokenizer.pad_token_id
+
+    # -------- build cfg and call your trainer --------
+    cfg = dict(extra)
+    cfg.update({"output_dir": run_dir, "seed": seed})
+
+    if common["epochs"] is not None: cfg["epochs"] = int(common["epochs"])
+    if common["train_batch_size"] is not None: cfg["train_batch_size"] = int(common["train_batch_size"])
+    if common["eval_batch_size"] is not None: cfg["eval_batch_size"] = int(common["eval_batch_size"])
+    if common["lr"] is not None: cfg["lr"] = float(common["lr"])
+    if common["weight_decay"] is not None: cfg["weight_decay"] = float(common["weight_decay"])
+    if common["warmup_ratio"] is not None: cfg["warmup_ratio"] = float(common["warmup_ratio"])
+    if common["grad_accum_steps"] is not None: cfg["grad_accum_steps"] = int(common["grad_accum_steps"])
+    if common["max_length"] is not None: cfg["max_length"] = int(common["max_length"])
+    if common["fp16"] is not None: cfg["fp16"] = bool(common["fp16"])
+    if common["num_workers"] is not None: cfg["num_workers"] = int(common["num_workers"])
+    if common["device"] is not None: cfg["device"] = common["device"]
+
+    result = _train_seqcls_model(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_examples,
+        val_dataset=val_examples,
+        # test_dataset=test_examples,
+        cfg=SimpleNamespace(**cfg),
+        dataset_spec=str(common["dataset_train"]),
+    )
+
+    out = {
+        "train": {
+            "trainer": "hfcls",
+            "model_kind": model_kind,
+            "hf_id": hf_id,
+            "base_model_used": base_model,
+            "tokenizer_used": tok_name,
+            "train_size": len(train_examples),
+            "val_size": len(val_examples),
+            "test_size": (len(test_examples) if test_examples is not None else 0),
+            "output_dir": run_dir,
+            "best_dir": result.get("best_dir"),
+            "last_dir": result.get("last_dir"),
+            "best_val_acc": result.get("best_val_acc"),
+            "test_acc": result.get("test_acc"),
+            "test_loss": result.get("test_loss"),
+            "test_used": result.get("test_used"),
+        },
+        "raw": result,
+    }
+
+    # ---------------------------
+    # Persist train summary
+    # ---------------------------
+    train_summary_path = os.path.join(run_dir, "train_summary.json")
+    try:
+        merged_summary = _merge_with_existing_summary(train_summary_path, out)
+        with open(train_summary_path, "w", encoding="utf-8") as f:
+            json.dump(merged_summary, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        _rprint(f"[MGTEval][train] Warning: failed to write train_summary.json: {e}", style="yellow")
+
+    # ---------------------------
+    # Optional auto-eval on dataset_test (detect-style)
+    # ---------------------------
+    if common.get("dataset_test"):
+        ckpt_dir = out["train"].get("best_dir") or out["train"].get("last_dir")
+        if not (ckpt_dir and os.path.isdir(str(ckpt_dir))):
+            cand_best = os.path.join(run_dir, "best")
+            ckpt_dir = cand_best if os.path.isdir(cand_best) else None
+
+        if ckpt_dir:
+            bs = int(cfg.get("eval_batch_size", 32))
+            ml = int(cfg.get("max_length", 512))
+            dev = cfg.get("device", None)
+            fp16 = bool(cfg.get("fp16", False))
+
+            eval_out_dir = _auto_eval_detect_once(
+                detector_name_for_eval="hfcls",
+                ckpt_dir=str(ckpt_dir),
+                test_spec=str(common["dataset_test"]),
+                test_sample_k=common.get("sample_k_test"),
+                train_run_dir=run_dir,
+                batch_size=bs,
+                device=dev,
+                fp16=fp16,
+                max_length=ml,
+                threshold=0.5,
+                save_curves=True,
+                eval_prefix="eval_test",
+            )
+            if eval_out_dir:
+                _rprint(f"[MGTEval][train] Auto-eval saved to: {eval_out_dir}")
+        else:
+            _rprint("[MGTEval][train] Warning: no ckpt_dir found for auto-eval.", style="yellow")
+
+    # -------- cleanup (HF fallback): normally nothing to remove --------
+    try:
+        base_out = common.get("output_dir")          # root， runs_hfcls
+        train_run_dir = run_dir                      # run （）
+        if base_out:
+            base_out = os.path.abspath(str(base_out))
+            tr_dir = os.path.abspath(str(train_run_dir))
+            # base_out  run_dir
+            if base_out != tr_dir and os.path.isdir(base_out) and len(os.listdir(base_out)) == 0:
+                os.rmdir(base_out)
+                _rprint(f"[MGTEval][train] Removed empty folder: {base_out}")
+    except Exception as e:
+        _rprint(f"[MGTEval][train] Warning: failed to remove empty output_dir: {e}", style="yellow")
+
+    return
+    
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Intercept --version
+    if argv and "--version" in argv:
+        try:
+            from importlib import metadata as _metadata
+            try:
+                ver = _metadata.version("MGT_Eval")
+            except _metadata.PackageNotFoundError:
+                ver = None
+        except Exception:
+            ver = None
+
+        if not ver:
+            try:
+                from pathlib import Path
+                import re as _re
+                root = Path(__file__).resolve().parent.parent
+                pyproject = root / "pyproject.toml"
+                if pyproject.is_file():
+                    text = pyproject.read_text(encoding="utf-8")
+                    m = _re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', text, flags=_re.MULTILINE)
+                    if m:
+                        ver = m.group(1)
+            except Exception:
+                pass
+
+        print(f"MGTEval {ver or 'unknown'}")
+        return
+
+    # Intercept --help/-h for beautiful custom output
+    if len(argv) == 1 and argv[0] in ('--help', '-h', 'help'):
+        try:
+            from cli_help_formatter import print_beautiful_help
+            print_beautiful_help()
+            sys.exit(0)
+        except ImportError:
+            pass  # Fall through to argparse default
+
+    yaml_cmd, yaml_cfg, argv, yaml_path = _maybe_extract_yaml(argv)
+    _install_rich_print()
+    help_epilog = (
+        "╔══════════════════════════════════════════════════════════════════════╗\n"
+        "║                         Quick Start Examples                         ║\n"
+        "╚══════════════════════════════════════════════════════════════════════╝\n"
+        "\n"
+        "📋 Discovery Commands:\n"
+        "  mgteval-cli list                    # List all available detectors\n"
+        "  mgteval-cli list --verbose          # Show detailed detector info\n"
+        "  mgteval-cli info binoculars         # Get info about a specific detector\n"
+        "  mgteval-cli examples                # Show comprehensive usage examples\n"
+        "  mgteval-cli troubleshoot            # Show troubleshooting guide\n"
+        "\n"
+        "🔍 Detection:\n"
+        "  mgteval-cli detect examples/detect/binoculars.yaml\n"
+        "  mgteval-cli detect --detector binoculars --data test.jsonl \\\n"
+        "      --model1 gpt-neo-2.7B --model2 gpt-neo-2.7B-instruct\n"
+        "\n"
+        "🏗️  Dataset Building:\n"
+        "  mgteval-cli build examples/build/build_dataset.yaml\n"
+        "  mgteval-cli attack examples/attack/build_attack_dataset.yaml\n"
+        "\n"
+        "🎯 Calibration & Training:\n"
+        "  mgteval-cli calibrate --detector binoculars --data dev.jsonl \\\n"
+        "      --model1 gpt-neo-2.7B --out calibration_results/\n"
+        "  mgteval-cli train examples/train/seqcls.yaml\n"
+        "\n"
+        "╔══════════════════════════════════════════════════════════════════════╗\n"
+        "║                              Tips & Notes                            ║\n"
+        "╚══════════════════════════════════════════════════════════════════════╝\n"
+        "\n"
+        "💡 YAML Shortcut:\n"
+        "   If the first argument is a .yaml/.yml file, it auto-loads the config.\n"
+        "   Example: mgteval-cli detect config.yaml\n"
+        "\n"
+        "📝 Conventions:\n"
+        "   • Labels: human=0, machine=1\n"
+        "   • Use --sample_k N for quick tests on N samples\n"
+        "   • Use --seed for reproducible results\n"
+        "\n"
+        "🌐 Common Issues:\n"
+        "   • Slow HF downloads: export HF_ENDPOINT=\"https://hf-mirror.com\"\n"
+        "   • GPU OOM: Reduce --batch_size or use --use_vllm\n"
+        "   • Run 'mgteval-cli troubleshoot' for more solutions\n"
+        "\n"
+        "📚 For detailed help on any command:\n"
+        "   mgteval-cli <command> --help\n"
+    )
+    ap = argparse.ArgumentParser(
+        prog="mgt-eval",
+        description=(
+            "Unified CLI for MGTEval (dataset build, attacks, detection, calibration, training)."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=help_epilog,
+    )
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    # list
+    ap_list = sub.add_parser("list", help="List available detectors")
+    ap_list.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show detailed information (type, description) for each detector"
+    )
+    ap_list.set_defaults(_fn=cmd_list)
+
+    # info - new enhanced command
+    ap_info = sub.add_parser(
+        "info",
+        help="Show detailed information about a specific detector",
+    )
+    ap_info.add_argument(
+        "detector",
+        help="Detector name (e.g., binoculars, fastdetectgpt)"
+    )
+    ap_info.set_defaults(_fn=cmd_info)
+
+    # examples - new enhanced command
+    ap_examples = sub.add_parser(
+        "examples",
+        help="Show usage examples for common tasks",
+    )
+    ap_examples.set_defaults(_fn=cmd_examples)
+
+    # troubleshoot - new enhanced command
+    ap_troubleshoot = sub.add_parser(
+        "troubleshoot",
+        help="Show troubleshooting guide for common issues",
+    )
+    ap_troubleshoot.set_defaults(_fn=cmd_troubleshoot)
+
+    # run
+    ap_run = sub.add_parser("detect", help="Run detector on a dataset")
+    ap_run.add_argument(
+        "--detector", required=(yaml_cmd != "detect"),
+        help=(
+            "Detector name. \n"
+            "1) Logic detectors (gltr/lastde/...): needs --model1 as scoring model.\n"
+            "2) Finetuned seqcls checkpoints (e.g., coco/mpu/longformer): use --model1 as checkpoint dir (or --lora_dir).\n"
+            "3) HF pretrained aliases (openai-detector-base/simpleai-detector/...): NO --model1 needed."
+        )
+    )
+    ap_run.add_argument("--data", required=(yaml_cmd != "detect"))
+        # ---- NEW: ASR (Attack Success Rate) ----
+    ap_run.add_argument(
+        "--attack",
+        dest="attack_dataset",
+        nargs="?",              # ✅
+        const="__SELF__",        # ✅  --attack ， --data  attack dataset
+        default=None,
+        help=(
+            "Enable ASR with ONE attack dataset.\n"
+            "Usage:\n"
+            "  --attack            (use --data itself as paired-record attack dataset)\n"
+            "  --attack adv.jsonl  (use given adv.jsonl)\n"
+            "Note: only ONE dataset is supported (no repeated flags, no commas)."
+        ),
+    )
+
+    ap_run.add_argument(
+        "--no-asr-details",
+        dest="asr_save_details",
+        action="store_false",
+        help="If set, do not save detailed metrics/asr.json (only keep summary.json).",
+    )
+    ap_run.set_defaults(asr_save_details=True)
+
+    # ---- detective specific (embedding KNN inference) ----
+    ap_run.add_argument(
+        "--train_dataset",
+        type=str,
+        default=None,
+        help="Detective: train/dev dataset spec for building the FAISS database "
+            "(e.g., 'train.jsonl,dev.jsonl')."
+    )
+    ap_run.add_argument(
+        "--embedding_model_name",
+        type=str,
+        default=None,
+        help="Detective: embedding model name/path (e.g., princeton-nlp/unsup-simcse-roberta-base). "
+    )
+    ap_run.add_argument(
+        "--embedding_ckpt_path",
+        type=str,
+        default=None,
+        help=(
+            "Detective: trained encoder ckpt path (e.g., .../best/model_best.pth). "
+            "If null/empty, auto-search latest local run (best/model_best.pth first, then last/model_last.pth)."
+        )
+    )
+    ap_run.add_argument("--pooling", type=str, default="average",
+                        help="Detective: pooling method (e.g., average/cls/last).")
+    ap_run.add_argument("--max_K", type=int, default=5, help="Detective: max K to search.")
+    ap_run.add_argument("--cache_root", type=str, default="~/.cache/mgt_eval",
+                        help="Detective: cache root for faiss db/index.")
+    ap_run.add_argument("--sample_k_train", type=int, default=None,
+                    help="Detective: subsample size for --train_dataset (database). Default: full.")
+    ap_run.add_argument("--sample_k_test", type=int, default=None,
+                        help="Detective: subsample size for --data (test). Default: follow --sample_k.")
+    # True：save_dataset
+    ap_run.add_argument("--save_dataset", dest="save_dataset", action="store_true",
+                        help="Detective: save processed dataset cache.")
+    ap_run.add_argument("--no-save-dataset", dest="save_dataset", action="store_false",
+                        help="Detective: do NOT save processed dataset cache.")
+    ap_run.add_argument(
+        "--knn_backend",
+        type=str,
+        default="torch",
+        choices=["torch", "faiss"],
+        help="Detective: KNN backend. torch=matrix topk; faiss=FAISS index (cacheable)."
+    )
+    # True：save_database
+    ap_run.add_argument("--save_database", dest="save_database", action="store_true",
+                        help="Detective: save FAISS database/index to disk.")
+    ap_run.add_argument("--no-save-database", dest="save_database", action="store_false",
+                        help="Detective: do NOT save FAISS database/index to disk.")
+    # True：reuse_database
+    ap_run.add_argument("--reuse_database", dest="reuse_database", action="store_true",
+                        help="Detective: reuse existing database if present.")
+    ap_run.add_argument("--no-reuse-database", dest="reuse_database", action="store_false",
+                        help="Detective: do NOT reuse existing database.")    
+    ap_run.add_argument("--index_name", type=str, default=None, help="Detective: faiss index name (None=auto hash).")
+    ap_run.add_argument("--use_gpu_index", action="store_true", help="Detective: use GPU faiss index.")
+    ap_run.add_argument("--return_probs", action="store_true", help="Detective: return probabilities.")
+    ap_run.add_argument("--index_batch_size", type=int, default=8,
+                        help="Detective: retrieval batch size (avoid cublas 13).")
+    # run  --seed / --batch_size / --num_workers( train )；
+    # detect  num_workers
+    ap_run.add_argument("--num_workers", type=int, default=0, help="Detective: num_workers for dataloading.")
+    ap_run.add_argument(
+        "--detective_eval",
+        action="store_true",
+        help="Detective: run standard evaluator (metrics/summary.json); uses --max_K as K.",
+    )
+
+    # NOTE:  required=True（ openai-detector-base ）
+    ap_run.add_argument("--model1", "--model", dest="model1", required=False,
+                        help=(
+                            "For metric-base detectors: scoring model path/id. "
+                            "For seqcls: checkpoint dir/path. "
+                            "When seqcls and set to null/empty/auto, CLI auto-searches latest local run "
+                            "(prefer best/, then last/)."
+                        ))
+    ap_run.add_argument(
+        "--model1_keyword",
+        default=None,
+        help=(
+            "Seqcls auto-search keyword when --model1 is null/empty/auto. "
+            "Default uses --detector."
+        ),
+    )
+    ap_run.add_argument(
+        "--model1_search_root",
+        default=None,
+        help=(
+            "Seqcls auto-search root dir for local checkpoints (comma-separated allowed). "
+            "If omitted, search common cwd/repo roots."
+        ),
+    )
+
+    ap_run.add_argument("--model2", default=None)
+    ap_run.add_argument("--batch_size", type=int, default=8)
+    ap_run.add_argument("--threshold", type=float, default=0.5)
+    ap_run.add_argument("--seed", type=int, default=114514)
+    ap_run.add_argument("--sample_k", type=int, default=None)
+    ap_run.add_argument("--device", default=None)
+
+    # ---- NEW: seqcls/Pretrained  ----
+    ap_run.add_argument("--tokenizer", default=None,
+                        help="Tokenizer path/id (seqcls/Pretrained only). Default follows --model1 or --ckpt_base.")
+    ap_run.add_argument("--max_length", type=int, default=512)
+
+    ap_run.add_argument("--lora_dir", default=None,
+                        help="LoRA adapter dir (seqcls/Pretrained only).")
+    ap_run.add_argument("--base", "--ckpt_base", dest="ckpt_base", default=None,
+                        help="LoRA base model dir/id (seqcls/Pretrained only).")
+
+    ap_run.add_argument("--fp16", action="store_true",
+                        help="Use fp16 on CUDA (seqcls/Pretrained + HF pretrained aliases).")
+
+    # ----  detector  bf16（ argparse bool ： True，）----
+    ap_run.add_argument("--bf16", dest="bf16", action="store_true",
+                        help="Enable bfloat16 (logic detectors).")
+    ap_run.add_argument("--no-bf16", dest="bf16", action="store_false",
+                        help="Disable bfloat16 (logic detectors).")
+    ap_run.set_defaults(
+        save_dataset=True,
+        save_database=True,
+        reuse_database=True,
+        use_gpu_index=True,
+        return_probs=True,
+    )
+    ap_run.set_defaults(bf16=True)
+
+    ap_run.add_argument("--detector_kwargs", default=None,
+                        help='JSON string, e.g. \'{"max_length":512}\'')
+    # ---- vLLM (optional, for DNAGPT/RAIDAR generation acceleration) ----
+    ap_run.add_argument("--use_vllm", dest="use_vllm", action="store_true", default=None,
+                        help="Use vLLM for generation if available (For RAIDAR Detector).")
+    ap_run.add_argument("--no-vllm", dest="use_vllm", action="store_false",
+                        help="Disable vLLM even if available.")
+    ap_run.add_argument("--vllm_gpu_memory_utilization", type=float, default=None)
+    ap_run.add_argument("--vllm_max_model_len", type=int, default=None)
+    ap_run.add_argument("--vllm_dtype", type=str, default=None)
+    ap_run.add_argument("--vllm_tensor_parallel_size", type=int, default=None)
+    ap_run.add_argument("--vllm_enforce_eager", dest="vllm_enforce_eager", action="store_true", default=None)
+    ap_run.add_argument("--no-vllm-enforce-eager", dest="vllm_enforce_eager", action="store_false")
+
+    ap_run.add_argument("--basemodel", default=None,
+                        help="For TOCSIN: choose the base detector")
+    ap_run.add_argument("--bart_ckpt", default=None,
+                        help="For TOCSIN")
+    ap_run.add_argument("--out", default=None)
+
+    # save_curves  type=bool
+    ap_run.add_argument("--save_curves", dest="save_curves", action="store_true",
+                        help="Save curves/figures (evaluator).")
+    ap_run.add_argument("--no-save-curves", dest="save_curves", action="store_false")
+    ap_run.set_defaults(save_curves=True)
+
+    ap_run.add_argument("--no_progress", action="store_true")
+    ap_run.add_argument("--k_runs", type=int, default=1)
+    if yaml_cmd == "detect":
+        ap_run.set_defaults(**yaml_cfg)
+    ap_run.set_defaults(_fn=cmd_run)
+
+    # calibrate
+    ap_cal = sub.add_parser("calibrate", help="Fit and save a calibrator JSON")
+    ap_cal.add_argument("--detector", required=(yaml_cmd != "calibrate"))
+    ap_cal.add_argument("--data", required=(yaml_cmd != "calibrate"))
+    ap_cal.add_argument("--model1", required=(yaml_cmd != "calibrate"))
+    ap_cal.add_argument("--model2", default=None)
+    ap_cal.add_argument("--batch_size", type=int, default=32)
+    ap_cal.add_argument("--sample_k", type=int, default=None)
+    ap_cal.add_argument("--seed", type=int, default=114514)
+    ap_cal.add_argument("--device", default=None)
+    ap_cal.add_argument("--bf16", action="store_true")
+    ap_cal.add_argument("--detector_kwargs", default=None,
+                        help='JSON string for detector extra kwargs')
+    # ---- vLLM (optional) ----
+    ap_cal.add_argument("--use_vllm", dest="use_vllm", action="store_true", default=None)
+    ap_cal.add_argument("--no-vllm", dest="use_vllm", action="store_false")
+    ap_cal.add_argument("--vllm_gpu_memory_utilization", type=float, default=None)
+    ap_cal.add_argument("--vllm_max_model_len", type=int, default=None)
+    ap_cal.add_argument("--vllm_dtype", type=str, default=None)
+    ap_cal.add_argument("--vllm_tensor_parallel_size", type=int, default=None)
+    ap_cal.add_argument("--vllm_enforce_eager", dest="vllm_enforce_eager", action="store_true", default=None)
+    ap_cal.add_argument("--no-vllm-enforce-eager", dest="vllm_enforce_eager", action="store_false")
+    ap_cal.add_argument("--basemodel", default=None)
+    ap_cal.add_argument("--bart_ckpt", default=None)
+    ap_cal.add_argument("--calibrator_name", default="platt_lr")
+    ap_cal.add_argument("--l2", type=float, default=1e-2)
+    ap_cal.add_argument("--max_iter", type=int, default=200)
+    ap_cal.add_argument("--tol", type=float, default=1e-6)
+    ap_cal.add_argument("--no_standardize", action="store_true")
+    # NEW:
+    ap_cal.add_argument(
+        "--mode",
+        default="acc",
+        choices=["acc", "f1", "tpr"],
+        help="Decision threshold search mode for calibrator: acc / f1 / tpr (TPR@FPR<=0.01).",
+    )
+    ap_cal.add_argument("--out", default=None)
+    ap_cal.add_argument("--out_dir", default=None)
+    ap_cal.add_argument("--no_progress", action="store_true")
+
+    # build (dataset generation)
+    ap_build = sub.add_parser("build", help="Build dataset (generation + optional attacks)")
+    _add_dataset_builder_args(ap_build, yaml_cmd=yaml_cmd)
+    if yaml_cmd == "build":
+        ap_build.set_defaults(**yaml_cfg)
+    ap_build.set_defaults(_fn=cmd_build)
+
+    # attack (attack-only dataset)
+    ap_attack = sub.add_parser("attack", help="Attack-only dataset build (no generation)")
+    _add_dataset_builder_args(ap_attack, yaml_cmd=yaml_cmd)
+    ap_attack.set_defaults(attack_dataset_only=1)
+    if yaml_cmd == "attack":
+        ap_attack.set_defaults(**yaml_cfg)
+    ap_attack.set_defaults(_fn=cmd_attack)
+
+    # train
+    ap_train = sub.add_parser("train", help="Train a finetuned detector with unified interface")
+    ap_train.add_argument(
+        "--detector", required=(yaml_cmd != "train"),
+        help=(
+            "Trainer name (coco/greater/pecola/...) OR an HF model id/local path for classification finetuning.\n"
+            "Rule: if detector matches a registered trainer -> use it; else -> HF classification finetune.\n"
+            "Force HF mode with prefix: hf:<hf_id_or_path> (useful if it conflicts with a trainer name).\n"
+            "Shorthands supported for convenience: deberta-v3-base, deberta-v3-large, ..."
+        ),
+    )
+
+    # -------- unified datasets --------
+    ap_train.add_argument("--dataset_train", "--dataset_training", "--data", dest="dataset_train", required=(yaml_cmd != "train"),
+                          help="Primary training dataset spec/path.")
+    ap_train.add_argument("--dataset_val", "--dataset_validation", dest="dataset_val", default=None,
+                          help="Optional validation dataset spec/path.")
+    ap_train.add_argument("--dataset_test", dest="dataset_test", default=None,
+                          help="Optional test dataset spec/path.")
+
+    # two optional auxiliary datasets (for methods like GREATER/PECOLA)
+    ap_train.add_argument("--dataset_aux1", "--dataset_surrogate", "--dataset_training_extra",
+                          dest="dataset_aux1", default=None,
+                          help="Optional auxiliary dataset #1 (GREATER: surrogate; PECOLA: training_extra).")
+    ap_train.add_argument("--dataset_aux2", dest="dataset_aux2", default=None,
+                          help="Optional auxiliary dataset #2 (rare; reserved).")
+
+    # -------- unified sampling --------
+    ap_train.add_argument("--sample_k_train", "--training_sample_k", "--sample_k", dest="sample_k_train", type=int, default=None,
+                          help="Subsample size for train (None = full).")
+    ap_train.add_argument("--sample_k_val", "--validation_sample_k", dest="sample_k_val", type=int, default=None,
+                          help="Subsample size for val (None = full).")
+    ap_train.add_argument("--sample_k_test", dest="sample_k_test", type=int, default=None,
+                          help="Subsample size for test (None = full).")
+    ap_train.add_argument("--sample_k_aux1", "--surrogate_sample_k", dest="sample_k_aux1", type=int, default=None,
+                          help="Subsample size for aux1 (e.g., GREATER surrogate_sample_k).")
+    ap_train.add_argument("--sample_k_aux2", dest="sample_k_aux2", type=int, default=None,
+                          help="Subsample size for aux2.")
+
+    # -------- unified models (up to 3) --------
+    ap_train.add_argument("--model1", "--base_model", "--surrogate_base_model", "--embedding_model",
+                          dest="model1", default=None,
+                          help="Model #1 (detector-dependent).")
+    ap_train.add_argument("--model2", "--detector_base_model", "--t5_model", "--reference_model",
+                          dest="model2", default=None,
+                          help="Model #2 (detector-dependent).")
+    ap_train.add_argument("--model3", "--mlm_model",
+                          dest="model3", default=None,
+                          help="Model #3 (detector-dependent, e.g., GREATER mlm_model).")
+    ap_train.add_argument("--tokenizer", "--tokenizer_path", dest="tokenizer", default=None,
+                          help="Tokenizer path/id (primarily for longformer; otherwise ignored).")
+
+    # -------- common hyperparams --------
+    ap_train.add_argument("--out", dest="output_dir", default=None,
+                          help="Output directory root for saving checkpoints.")
+    ap_train.add_argument("--seed", type=int, default=42)
+
+    ap_train.add_argument("--epochs", type=int, default=None)
+    ap_train.add_argument("--train_batch_size", "--batch_size", type=int, default=None)
+    ap_train.add_argument("--eval_batch_size", type=int, default=None)
+    ap_train.add_argument("--lr", type=float, default=None)
+    ap_train.add_argument("--weight_decay", type=float, default=None)
+    ap_train.add_argument("--warmup_ratio", type=float, default=None)
+    ap_train.add_argument("--grad_accum_steps", type=int, default=None)
+    ap_train.add_argument("--max_length", type=int, default=None)
+    ap_train.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow loading HF models with custom code (use with caution).",
+    )
+    # tri-state fp16: default None (don't override trainer defaults)
+    ap_train.add_argument("--fp16", dest="fp16", action="store_true", default=None)
+    ap_train.add_argument("--no-fp16", dest="fp16", action="store_false")
+
+    ap_train.add_argument("--num_workers", type=int, default=None)
+    ap_train.add_argument("--devices", type=int, default=None)
+
+    # a few extra common knobs (mostly for longformer-like trainers)
+    ap_train.add_argument("--device", type=str, default=None)
+    ap_train.add_argument("--name", type=str, default=None)
+
+    # keep escape hatch
+    ap_train.add_argument("--train_kwargs", default=None,
+                          help='Extra JSON dict forwarded to the trainer (trainer-native keys).')
+
+    # metric-calibrate extras (accepted; used when detector is metric)
+    ap_train.add_argument("--detector_kwargs", default=None,
+                          help='JSON string for detector extra kwargs (metric calibration).')
+    # ---- vLLM (optional) ----
+    ap_train.add_argument("--use_vllm", dest="use_vllm", action="store_true", default=None)
+    ap_train.add_argument("--no-vllm", dest="use_vllm", action="store_false")
+    ap_train.add_argument("--vllm_gpu_memory_utilization", type=float, default=None)
+    ap_train.add_argument("--vllm_max_model_len", type=int, default=None)
+    ap_train.add_argument("--vllm_dtype", type=str, default=None)
+    ap_train.add_argument("--vllm_tensor_parallel_size", type=int, default=None)
+    ap_train.add_argument("--vllm_enforce_eager", dest="vllm_enforce_eager", action="store_true", default=None)
+    ap_train.add_argument("--no-vllm-enforce-eager", dest="vllm_enforce_eager", action="store_false")
+    ap_train.add_argument("--basemodel", default=None)
+    ap_train.add_argument("--bart_ckpt", default=None)
+    ap_train.add_argument("--calibrator_name", default="platt_lr")
+    ap_train.add_argument("--l2", type=float, default=1e-2)
+    ap_train.add_argument("--max_iter", type=int, default=200)
+    ap_train.add_argument("--tol", type=float, default=1e-6)
+    ap_train.add_argument("--no_standardize", action="store_true")
+    ap_train.add_argument(
+        "--mode",
+        default="acc",
+        choices=["acc", "f1", "tpr"],
+        help="Decision threshold search mode for calibrator: acc / f1 / tpr (TPR@FPR<=0.01).",
+    )
+    ap_train.add_argument("--out_dir", default=None,
+                          help="Metric calibration output directory (if detector is metric).")
+    ap_train.add_argument("--no_progress", action="store_true")
+    ap_train.add_argument("--bf16", dest="bf16", action="store_true",
+                          help="Enable bfloat16 for metric calibration scoring.")
+    ap_train.add_argument("--no-bf16", dest="bf16", action="store_false",
+                          help="Disable bfloat16 for metric calibration scoring.")
+
+    if yaml_cmd == "train":
+        ap_train.set_defaults(**yaml_cfg)
+    ap_train.set_defaults(_fn=cmd_train)
+    if yaml_cmd == "calibrate":
+        ap_cal.set_defaults(**yaml_cfg)
+    ap_cal.set_defaults(_fn=cmd_calibrate)
+
+    args = ap.parse_args(argv)
+    # attach yaml context for logging
+    args._yaml_cfg = yaml_cfg
+    args._yaml_path = yaml_path
+    if yaml_cmd == "train":
+        miss = _missing_required(args, ["detector", "dataset_train"])
+        if miss:
+            src = f" (from {yaml_path})" if yaml_path else ""
+            raise SystemExit(f"[MGTEval][train] YAML missing required fields{src}: {', '.join(miss)}")
+    if yaml_cmd == "detect":
+        miss = _missing_required(args, ["detector", "data"])
+        if miss:
+            src = f" (from {yaml_path})" if yaml_path else ""
+            raise SystemExit(f"[MGTEval][detect] YAML missing required fields{src}: {', '.join(miss)}")
+    if yaml_cmd == "calibrate":
+        miss = _missing_required(args, ["detector", "data", "model1"])
+        if miss:
+            src = f" (from {yaml_path})" if yaml_path else ""
+            raise SystemExit(f"[MGTEval][calibrate] YAML missing required fields{src}: {', '.join(miss)}")
+    if yaml_cmd == "build":
+        miss = _missing_required(args, ["data", "out"])
+        if miss:
+            src = f" (from {yaml_path})" if yaml_path else ""
+            raise SystemExit(f"[MGTEval][build] YAML missing required fields{src}: {', '.join(miss)}")
+    if yaml_cmd == "attack":
+        miss = _missing_required(args, ["data", "out"])
+        if miss:
+            src = f" (from {yaml_path})" if yaml_path else ""
+            raise SystemExit(f"[MGTEval][attack] YAML missing required fields{src}: {', '.join(miss)}")
+    try:
+        args._fn(args)
+    except KeyboardInterrupt:
+        _rprint("\n[MGTEval] Interrupted by user.")
+        raise SystemExit(130)
+
+if __name__ == "__main__":
+    main()

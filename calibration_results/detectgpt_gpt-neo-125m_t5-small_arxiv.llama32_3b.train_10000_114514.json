@@ -1,0 +1,96 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": 0.36683410971839864,
+    "beta1": -3.00589402363553,
+    "standardize": true,
+    "mean": 0.595656494613504,
+    "std": 0.2811572886099605,
+    "threshold_raw_p05": 0.629968444019269,
+    "decision_mode": "acc",
+    "decision_threshold": 0.43810731172561646
+  },
+  "meta": {
+    "detector": "DetectGPT[gpt-neo-125m|t5-small]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 400,
+      "pos": 190,
+      "neg": 210,
+      "auroc_on_scores": 0.08979949874686717,
+      "metrics_on_probs": {
+        "acc": 0.8375,
+        "precision": 0.8787878787878788,
+        "recall": 0.7631578947368421,
+        "f1": 0.8169014084507042,
+        "confusion": {
+          "tp": 145,
+          "tn": 190,
+          "fp": 20,
+          "fn": 45
+        },
+        "num_samples": 400,
+        "num_pos": 190,
+        "num_neg": 210,
+        "auroc": 0.9102005012531329,
+        "aupr": 0.9225633595314859
+      },
+      "feature_dim": 1,
+      "tpr_at_fpr": {
+        "0.05": {
+          "threshold": 0.7065719962120056,
+          "tpr": 0.6894736842105263,
+          "fpr": 0.04285714285714286
+        },
+        "0.01": {
+          "threshold": 0.8209991455078125,
+          "tpr": 0.6052631578947368,
+          "fpr": 0.009523809523809525
+        },
+        "0.001": {
+          "threshold": 0.9460797309875488,
+          "tpr": 0.45789473684210524,
+          "fpr": 0.0
+        },
+        "0.0001": {
+          "threshold": 0.9460797309875488,
+          "tpr": 0.45789473684210524,
+          "fpr": 0.0
+        }
+      },
+      "threshold_mode": "acc",
+      "selected_threshold": {
+        "mode": "acc",
+        "threshold": 0.43810731172561646,
+        "metric_value": 0.8525,
+        "metrics": {
+          "acc": 0.8525,
+          "precision": 0.8659217877094972,
+          "recall": 0.8157894736842105,
+          "f1": 0.8401084010840109,
+          "confusion": {
+            "tp": 155,
+            "tn": 186,
+            "fp": 24,
+            "fn": 35
+          },
+          "num_samples": 400,
+          "num_pos": 190,
+          "num_neg": 210
+        }
+      }
+    },
+    "models": {
+      "model1": "EleutherAI/gpt-neo-125m",
+      "model2": "google-t5/t5-small"
+    },
+    "dataset": "data/arxiv.llama32_3b.train.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

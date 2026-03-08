@@ -1,0 +1,25 @@
+detector: lastde
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+sample_k_train: 0
+seed: 114514
+train_batch_size: 32
+device: 'cuda:0'
+bf16: true
+calibrator_name: platt_lr
+l2: 0.01
+max_iter: 200
+tol: 1e-06
+no_standardize: false
+mode: acc
+out: null
+out_dir: calibration_results
+no_progress: false
+model1: EleutherAI/gpt-neo-125m
+detector_kwargs:
+  # score_model: EleutherAI/gpt-neo-125m
+  max_token_observed: 512
+  embed_size: 3
+  epsilon_mult: 10.0
+  tau_prime: 5
+  device: 'cuda:0'
+  use_bfloat16: true

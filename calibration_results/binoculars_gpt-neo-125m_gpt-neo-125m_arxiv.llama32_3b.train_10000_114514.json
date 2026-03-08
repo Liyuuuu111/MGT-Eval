@@ -1,0 +1,96 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.19527046958592148,
+    "beta1": -6.574421968503626,
+    "standardize": true,
+    "mean": -1.182928247153759,
+    "std": 0.1710034159734438,
+    "threshold_raw_p05": -1.188007312278861,
+    "decision_mode": "acc",
+    "decision_threshold": 0.9929859638214111
+  },
+  "meta": {
+    "detector": "Binoculars[gpt-neo-125m|gpt-neo-125m]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 400,
+      "pos": 190,
+      "neg": 210,
+      "auroc_on_scores": 0.002882205513784465,
+      "metrics_on_probs": {
+        "acc": 0.995,
+        "precision": 1.0,
+        "recall": 0.9894736842105263,
+        "f1": 0.9947089947089947,
+        "confusion": {
+          "tp": 188,
+          "tn": 210,
+          "fp": 0,
+          "fn": 2
+        },
+        "num_samples": 400,
+        "num_pos": 190,
+        "num_neg": 210,
+        "auroc": 0.9971177944862163,
+        "aupr": 0.9979786657917427
+      },
+      "feature_dim": 1,
+      "tpr_at_fpr": {
+        "0.05": {
+          "threshold": 0.24603120982646942,
+          "tpr": 0.9947368421052631,
+          "fpr": 0.009523809523809525
+        },
+        "0.01": {
+          "threshold": 0.24603120982646942,
+          "tpr": 0.9947368421052631,
+          "fpr": 0.009523809523809525
+        },
+        "0.001": {
+          "threshold": 0.9929859638214111,
+          "tpr": 0.9894736842105263,
+          "fpr": 0.0
+        },
+        "0.0001": {
+          "threshold": 0.9929859638214111,
+          "tpr": 0.9894736842105263,
+          "fpr": 0.0
+        }
+      },
+      "threshold_mode": "acc",
+      "selected_threshold": {
+        "mode": "acc",
+        "threshold": 0.9929859638214111,
+        "metric_value": 0.995,
+        "metrics": {
+          "acc": 0.995,
+          "precision": 1.0,
+          "recall": 0.9894736842105263,
+          "f1": 0.9947089947089947,
+          "confusion": {
+            "tp": 188,
+            "tn": 210,
+            "fp": 0,
+            "fn": 2
+          },
+          "num_samples": 400,
+          "num_pos": 190,
+          "num_neg": 210
+        }
+      }
+    },
+    "models": {
+      "model1": "EleutherAI/gpt-neo-125m",
+      "model2": "EleutherAI/gpt-neo-125m"
+    },
+    "dataset": "data/arxiv.llama32_3b.train.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

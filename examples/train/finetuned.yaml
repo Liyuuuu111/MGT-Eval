@@ -1,0 +1,24 @@
+detector: hf:roberta-base
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_val: null
+dataset_test: null
+sample_k_train: 400
+sample_k_val: 0
+model1: null
+tokenizer: null
+output_dir: models/runs_baseline
+seed: 42
+epochs: 3
+train_batch_size: 32
+eval_batch_size: 64
+lr: 5e-5
+weight_decay: 0.0
+warmup_ratio: 0.06
+grad_accum_steps: 1
+max_length: 512
+fp16: true
+num_workers: 0
+device: 'cuda:0'
+trust_remote_code: false
+train_kwargs:
+  num_labels: 2
