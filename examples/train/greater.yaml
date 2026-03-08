@@ -1,0 +1,33 @@
+detector: greater
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_aux1: data/arxiv.llama32_3b.train.jsonl
+sample_k_train: 400
+sample_k_val: 0
+sample_k_aux1: 400
+# change it into xlm-roberta-base for the original paper
+# model1: target detector
+model1: albert/albert-base-v2
+# model2: surrogate detector
+model2: albert/albert-base-v2
+# model3: mlm model
+model3: albert/albert-base-v2
+output_dir: models/runs_greater
+seed: 114514
+epochs: 3
+train_batch_size: 16
+eval_batch_size: 64
+max_length: 512
+fp16: true
+warmup_ratio: 0.06
+weight_decay: 0.0
+grad_accum_steps: 1
+train_kwargs:
+  surrogate_epochs: 3
+  surrogate_bs: 32
+  surrogate_lr: 5e-5
+  label_smoothing: 0.01
+  k_percent: 0.12
+  per_pos_topk: 20
+  max_replacements: null
+  adv_prob_ai: 1.0
+  adv_prob_human: 0.2

@@ -1,0 +1,51 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.08622487019447365,
+    "beta1": 1.6951178785921126,
+    "standardize": true,
+    "mean": 0.6570438704043626,
+    "std": 0.12526390220003641,
+    "threshold_raw_p05": 0.663415618259575
+  },
+  "meta": {
+    "detector": "DetectGPT[GPT-Neo-2.7B|t5-large]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 4000,
+      "pos": 2000,
+      "neg": 2000,
+      "auroc_on_scores": 0.8240432500000013,
+      "metrics_on_probs": {
+        "acc": 0.76175,
+        "precision": 0.7420249653259362,
+        "recall": 0.8025,
+        "f1": 0.7710785491232285,
+        "confusion": {
+          "tp": 1605,
+          "tn": 1442,
+          "fp": 558,
+          "fn": 395
+        },
+        "num_samples": 4000,
+        "num_pos": 2000,
+        "num_neg": 2000,
+        "auroc": 0.8240432500000013,
+        "aupr": 0.7476601869053133
+      },
+      "feature_dim": 1
+    },
+    "models": {
+      "model1": "/home/lyf/models/GPT-Neo-2.7B",
+      "model2": "/home/lyf/models/t5-large"
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

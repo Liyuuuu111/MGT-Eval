@@ -1,0 +1,360 @@
+[
+  {
+    "key": "binoculars",
+    "detector": "binoculars",
+    "name": "Binoculars",
+    "type": "Metric-based",
+    "venue": "ICML 2024",
+    "description": {
+      "en": "Compares cross-perplexity between two LLMs (an 'observer' and a 'performer') to zero-shot identify machine-generated passages.",
+      "zh": "通过比较两个语言模型（观察者与执行者）的交叉困惑度之比来零样本识别机器生成文本。"
+    },
+    "paper": "Spotting LLMs With Binoculars: Zero-Shot Detection of Machine-Generated Text",
+    "authors": "Abhimanyu Hans, Avi Schwarzschild, Valeriia Cherepanova, Hamid Kazemi, Aniruddha Saha, Micah Goldblum, Jonas Geiping, Tom Goldstein",
+    "link": "https://arxiv.org/abs/2401.12070"
+  },
+  {
+    "key": "coco",
+    "detector": "coco",
+    "name": "CoCo",
+    "type": "Fine-tuned",
+    "venue": "EMNLP 2023",
+    "description": {
+      "en": "Enhances detection under low-resource settings by incorporating text coherence signals into a contrastive learning framework.",
+      "zh": "在低资源场景下，将文本连贯性信号融入对比学习框架以增强检测效果。"
+    },
+    "paper": "CoCo: Coherence-Enhanced Machine-Generated Text Detection Under Low Resource With Contrastive Learning",
+    "authors": "Xiaoming Liu, Zhaohan Zhang, Yichen Wang, Hang Pu, Yu Lan, Chao Shen",
+    "link": "https://aclanthology.org/2023.emnlp-main.1005/"
+  },
+  {
+    "key": "detectgpt",
+    "detector": "detectgpt",
+    "name": "DetectGPT",
+    "type": "Metric-based",
+    "venue": "ICML 2023 Oral",
+    "description": {
+      "en": "Perturbs input text and measures probability curvature — machine-generated text tends to occupy local maxima in log-probability space.",
+      "zh": "对输入文本进行扰动并测量概率曲率——机器生成的文本倾向于占据对数概率空间的局部极大值。"
+    },
+    "paper": "DetectGPT: Zero-Shot Machine-Generated Text Detection using Probability Curvature",
+    "authors": "Eric Mitchell, Yoonho Lee, Alexander Khazatsky, Christopher D. Manning, Chelsea Finn",
+    "link": "https://arxiv.org/abs/2301.11305"
+  },
+  {
+    "key": "detective",
+    "detector": "detective",
+    "name": "DeTeCtive",
+    "type": "Fine-tuned",
+    "venue": "NIPS 2024",
+    "description": {
+      "en": "Employs multi-level contrastive learning (word, sentence, document) to learn fine-grained representations for AI text detection.",
+      "zh": "采用多层次对比学习（词、句、篇章级别）学习细粒度表征，用于AI生成文本检测。"
+    },
+    "paper": "DeTeCtive: Detecting AI-generated Text via Multi-Level Contrastive Learning",
+    "authors": "Xun Guo, Shan Zhang, Yongxin He, Ting Zhang, Wanquan Feng, Haibin Huang, Chongyang Ma",
+    "link": "https://arxiv.org/abs/2410.13964"
+  },
+  {
+    "key": "dnadetectllm",
+    "detector": "dnadetectllm",
+    "name": "DNA-DetectLLM",
+    "type": "Metric-based",
+    "venue": "NIPS 2025 Spotlight",
+    "description": {
+      "en": "Applies a DNA-inspired mutation-repair paradigm: mutates text tokens and observes how well a language model 'repairs' them to distinguish human from AI text.",
+      "zh": "采用DNA启发的突变-修复范式：对文本词元进行突变，观察语言模型的修复能力来区分人类与AI文本。"
+    },
+    "paper": "DNA-DetectLLM: Unveiling AI-Generated Text via a DNA-Inspired Mutation-Repair Paradigm",
+    "authors": "Xiaowei Zhu, Yubing Ren, Fang Fang, Qingfeng Tan, Shi Wang, Yanan Cao",
+    "link": "https://openreview.net/forum?id=yQoHUijSHx"
+  },
+  {
+    "key": "dnagpt",
+    "detector": "dnagpt",
+    "name": "DNA-GPT",
+    "type": "Metric-based",
+    "venue": "ICLR 2024",
+    "description": {
+      "en": "Detects GPT-generated text through divergent N-gram analysis — comparing N-gram divergence patterns between the original and re-generated versions.",
+      "zh": "通过分歧N元组分析检测GPT生成文本——比较原始文本与重新生成版本之间的N-gram分歧模式。"
+    },
+    "paper": "DNA-GPT: Divergent N-Gram Analysis for Training-Free Detection of GPT-Generated Text",
+    "authors": "Xianjun Yang, Wei Cheng, Yue Wu, Linda Petzold, William Yang Wang, Haifeng Chen",
+    "link": "https://arxiv.org/abs/2305.17359"
+  },
+  {
+    "key": "entropy",
+    "detector": "entropy",
+    "name": "Entropy",
+    "type": "Metric-based",
+    "description": {
+      "en": "Measures average prediction entropy at each token position — machine-generated text often shows lower entropy patterns.",
+      "zh": "测量每个词元位置的预测熵均值——机器生成文本通常呈现更低的熵分布模式。"
+    },
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "fastdetectgpt",
+    "detector": "fastdetectgpt",
+    "name": "Fast-DetectGPT",
+    "type": "Metric-based",
+    "venue": "ICLR 2024",
+    "description": {
+      "en": "Accelerates DetectGPT by replacing expensive perturbation sampling with conditional probability curvature estimation via a single forward pass.",
+      "zh": "通过条件概率曲率估计替代昂贵的扰动采样，大幅加速DetectGPT的检测流程。"
+    },
+    "paper": "Fast-DetectGPT: Efficient Detection of Machine-Generated Text via Sampling Discrepancy",
+    "authors": "Guangsheng Bao, Yanbin Zhao, Zhiyang Teng, Linyi Yang, Yue Zhang",
+    "link": "https://arxiv.org/abs/2310.05130"
+  },
+  {
+    "key": "finetuned",
+    "detector": "hfcls",
+    "name": "Finetuned Detector",
+    "type": "Fine-tuned",
+    "description": {
+      "en": "Loads a locally fine-tuned classification checkpoint as a detector — supports any HuggingFace-compatible model.",
+      "zh": "加载本地微调的分类检查点作为检测器——支持任何HuggingFace兼容模型。"
+    },
+    "paper": null,
+    "authors": null,
+    "link": null
+  },
+  {
+    "key": "gltr",
+    "detector": "gltr",
+    "name": "GLTR",
+    "type": "Metric-based",
+    "venue": "ACL 2019",
+    "description": {
+      "en": "Visualizes and aggregates per-token rank statistics (top-k bucket counts) from a language model to distinguish human from machine text.",
+      "zh": "通过语言模型逐词排名统计（top-k分桶计数）的可视化与聚合来区分人类与机器文本。"
+    },
+    "paper": "GLTR: Statistical Detection and Visualization of Generated Text",
+    "authors": "Sebastian Gehrmann, Hendrik Strobelt, Alexander M. Rush",
+    "link": "https://arxiv.org/abs/1906.04043"
+  },
+  {
+    "key": "greater",
+    "detector": "greater",
+    "name": "GREATER",
+    "type": "Fine-tuned",
+    "venue": "ACL 2025",
+    "description": {
+      "en": "Applies adversarial training to harden machine text detectors against text perturbation attacks — the 'Iron Sharpens Iron' approach.",
+      "zh": "通过对抗训练增强检测器对文本扰动攻击的鲁棒性——以铁磨铁策略提升防御能力。"
+    },
+    "paper": "Iron Sharpens Iron: Defending Against Attacks in Machine-Generated Text Detection with Adversarial Training",
+    "authors": "Yuanfan Li, Zhaohan Zhang, Chengzhengxu Li, Chao Shen, Xiaoming Liu",
+    "link": "https://arxiv.org/abs/2502.12734"
+  },
+  {
+    "key": "imbd",
+    "detector": "imbd",
+    "name": "ImBD",
+    "type": "Fine-tuned",
+    "venue": "AAAI 2025 Oral",
+    "description": {
+      "en": "Addresses class imbalance in detection data by aligning machine stylistic preferences — 'Imitate Before Detect.'",
+      "zh": "通过对齐机器文体偏好来处理检测数据中的类不平衡问题——先模仿，后检测。"
+    },
+    "paper": "Aligning Machine Stylistic Preference for Machine-Revised Text Detection",
+    "authors": "AAAI 2025 Oral: Imitate Before Detect",
+    "link": null
+  },
+  {
+    "key": "lastde",
+    "detector": "lastde",
+    "name": "LASTDE",
+    "type": "Metric-based",
+    "venue": "ICLR 2025",
+    "description": {
+      "en": "Mines token probability sequences to detect LLM-generated text without any fine-tuning, using statistical patterns in probability distributions.",
+      "zh": "通过挖掘词元概率序列中的统计模式来免训练检测LLM生成文本。"
+    },
+    "paper": "Training-free LLM-generated Text Detection by Mining Token Probability Sequences",
+    "authors": "Yihuai Xu, Yongwei Wang, Yifei Bi, Huangsen Cao, Zhouhan Lin, Yu Zhao, Fei Wu",
+    "link": "https://openreview.net/forum?id=vo4AHjowKi"
+  },
+  {
+    "key": "lastdepp",
+    "detector": "lastdepp",
+    "name": "LASTDE++",
+    "type": "Metric-based",
+    "venue": "ICLR 2025",
+    "description": {
+      "en": "An enhanced version of LASTDE with improved probability sequence mining and additional statistical features for stronger detection.",
+      "zh": "LASTDE的增强版本，采用改进的概率序列挖掘方法和额外的统计特征以提升检测能力。"
+    },
+    "paper": "Training-free LLM-generated Text Detection by Mining Token Probability Sequences",
+    "authors": "Yihuai Xu, Yongwei Wang, Yifei Bi, Huangsen Cao, Zhouhan Lin, Yu Zhao, Fei Wu",
+    "link": "https://openreview.net/forum?id=vo4AHjowKi"
+  },
+  {
+    "key": "likelihood",
+    "detector": "likelihood",
+    "name": "Likelihood",
+    "type": "Metric-based",
+    "description": {
+      "en": "Computes the average log-probability of each token under a reference language model as a baseline detection signal.",
+      "zh": "计算参考语言模型下每个词元的平均对数概率，作为基线检测信号。"
+    },
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "logrank",
+    "detector": "logrank",
+    "name": "LogRank",
+    "type": "Metric-based",
+    "description": {
+      "en": "Applies a logarithmic transform to per-token ranks before averaging, providing a more robust baseline metric than raw rank.",
+      "zh": "对逐词排名取对数后求平均，提供比原始排名更稳健的基线检测指标。"
+    },
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "longformer",
+    "detector": "longformer",
+    "name": "Longformer",
+    "type": "Fine-tuned",
+    "description": {
+      "en": "Uses the Longformer architecture with global attention to classify long documents as human or machine-generated.",
+      "zh": "利用Longformer的全局注意力架构对长文档进行人类/机器生成文本分类。"
+    },
+    "paper": "Longformer: Long-Document Transformer",
+    "authors": "Beltagy et al.",
+    "link": null
+  },
+  {
+    "key": "lrr",
+    "detector": "lrr",
+    "name": "LRR",
+    "type": "Metric-based",
+    "venue": "EMNLP 2023 Findings",
+    "description": {
+      "en": "Combines log-likelihood with log-rank information to zero-shot detect machine text, exploiting complementary statistical signals.",
+      "zh": "结合对数似然与对数排名信息进行零样本检测，利用两种互补的统计信号。"
+    },
+    "paper": "DetectLLM: Leveraging Log Rank Information for Zero-Shot Detection of Machine-Generated Text",
+    "authors": "Jinyan Su, Terry Yue Zhuo, Di Wang, Preslav Nakov",
+    "link": "https://arxiv.org/abs/2306.05540"
+  },
+  {
+    "key": "mpu",
+    "detector": "mpu",
+    "name": "MPU",
+    "type": "Fine-tuned",
+    "venue": "ICLR 2024 Spotlight",
+    "description": {
+      "en": "Tackles short-text detection through multiscale positive-unlabeled learning, effective even without labeled negative examples.",
+      "zh": "通过多尺度正样本-无标签学习处理短文本检测任务，即使没有标注负样本也能有效工作。"
+    },
+    "paper": "Multiscale Positive-Unlabeled Detection of AI-Generated Texts",
+    "authors": "Yuchuan Tian, Hanting Chen, Xutao Wang, Zheyuan Bai, Qinghua Zhang, Ruifeng Li, Chao Xu, Yunhe Wang",
+    "link": "https://arxiv.org/abs/2305.18149"
+  },
+  {
+    "key": "npr",
+    "detector": "npr",
+    "name": "NPR",
+    "type": "Metric-based",
+    "venue": "EMNLP 2023 Findings",
+    "description": {
+      "en": "Normalizes prediction probability ratios across nested contexts to detect machine text without any training.",
+      "zh": "通过在嵌套上下文中归一化预测概率比来零样本检测机器生成文本。"
+    },
+    "paper": "DetectLLM: Leveraging Log Rank Information for Zero-Shot Detection of Machine-Generated Text",
+    "authors": "Jinyan Su, Terry Yue Zhuo, Di Wang, Preslav Nakov",
+    "link": "https://arxiv.org/abs/2306.05540"
+  },
+  {
+    "key": "pecola",
+    "detector": "pecola",
+    "name": "PECOLA",
+    "type": "Fine-tuned",
+    "venue": "ACL 2024",
+    "description": {
+      "en": "Bridges selective perturbation with fine-tuned contrastive learning, improving upon DetectGPT's perturbation utilization.",
+      "zh": "将选择性扰动与微调对比学习相结合，改进了DetectGPT对扰动信息的利用方式。"
+    },
+    "paper": "Does DETECTGPT Fully Utilize Perturbation? Bridging Selective Perturbation to Fine-tuned Contrastive Learning Detector would be Better",
+    "authors": "Shengchao Liu, Xiaoming Liu*, Yichen Wang, Zehua Cheng, Chengzhengxu Li, Yu Lan, Chao Shen",
+    "link": "https://arxiv.org/abs/2402.00263"
+  },
+  {
+    "key": "radar",
+    "detector": "radar",
+    "name": "RADAR",
+    "type": "Fine-tuned",
+    "venue": "NIPS 2023",
+    "description": {
+      "en": "Trains a paraphrase detector jointly with a paraphrase generator to build robustness against common evasion attacks.",
+      "zh": "联合训练改写检测器与改写生成器，构建对常见规避攻击的鲁棒检测能力。"
+    },
+    "paper": "RADAR: Robust AI-Text Detection via Adversarial Learning",
+    "authors": "Xiaomeng Hu, Pin-Yu Chen, Tsung-Yi Ho",
+    "link": "https://arxiv.org/abs/2307.03838"
+  },
+  {
+    "key": "raidar",
+    "detector": "raidar",
+    "name": "RAIDAR",
+    "type": "Metric-based",
+    "venue": "ICLR 2024",
+    "description": {
+      "en": "Detects AI-generated text by rewriting the input and comparing semantic similarity — human text changes more substantially when rewritten.",
+      "zh": "通过改写输入文本并比较语义相似度来检测AI生成文本——人类文本被改写后变化更大。"
+    },
+    "paper": "Raidar: geneRative AI Detection viA Rewriting",
+    "authors": "Chengzhi Mao, Carl Vondrick, Hao Wang, Junfeng Yang",
+    "link": "https://arxiv.org/abs/2401.12970"
+  },
+  {
+    "key": "rank",
+    "detector": "rank",
+    "name": "Rank",
+    "type": "Metric-based",
+    "description": {
+      "en": "Uses the average prediction rank of each token as a detection statistic — machine text tends to have lower (better) average ranks.",
+      "zh": "利用每个词元的平均预测排名作为检测统计量——机器文本通常具有更低的平均排名。"
+    },
+    "paper": "N/A",
+    "authors": "Community Implementations",
+    "link": null
+  },
+  {
+    "key": "tocsin",
+    "detector": "tocsin",
+    "name": "TOCSIN",
+    "type": "Metric-based",
+    "venue": "EMNLP 2024",
+    "description": {
+      "en": "Zero-shot detector that measures token cohesiveness — the consistency of token-level predictions — to identify LLM-generated text.",
+      "zh": "通过测量词元聚合性（token-level预测的一致性）来零样本识别LLM生成文本。"
+    },
+    "paper": "Zero-Shot Detection of LLM-Generated Text using Token Cohesiveness",
+    "authors": "Shixuan Ma, Quan Wang",
+    "link": "https://arxiv.org/abs/2409.16914"
+  },
+  {
+    "key": "taste",
+    "detector": "taste",
+    "name": "TASTE",
+    "type": "Fine-tuned",
+    "venue": "ICLR 2026",
+    "description": {
+      "en": "Enhances cross-lingual robustness of MGT detection via dictionary-driven adversarial training. Uses mBERT as the target detector and GPT-2 as a surrogate model. Training uses English data only; multilingual datasets (ar/zh/de/ru) are for evaluation.",
+      "zh": "通过词典驱动的对抗训练增强跨语言机器生成文本检测的鲁棒性。训练仅使用英文数据；多语言数据集用于评测。"
+    },
+    "paper": "Learning From Dictionary: Enhancing Robustness of Machine-Generated Text Detection in Zero-Shot Language via Adversarial Training",
+    "authors": "Yuanfan Li, Qi Zhou, Zexuan Xie",
+    "link": null
+  }
+]

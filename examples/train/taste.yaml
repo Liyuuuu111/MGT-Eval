@@ -1,0 +1,54 @@
+# TASTE Training Configuration
+# Paper: Learning From Dictionary: Enhancing Robustness of Machine-Generated Text Detection
+#        in Zero-Shot Language via Adversarial Training
+# Venue: ICLR 2026 | Authors: Yuanfan Li, Qi Zhou, Zexuan Xie
+#
+# ⚠️  Training uses English data only.
+#     Multilingual datasets (ar/zh/de/ru) are for EVALUATION only.
+#     Multilingual dataset download: https://pan.quark.cn/s/5bfda86f9d1f
+#
+# Translation dictionaries are built-in: src/detectors/finetuned/TASTE/translation/
+# Default model save path: models/runs_taste
+
+detector: taste
+
+# ── Dataset (English training data only) ─────────────────────────────────────
+# JSONL format with 'text' (str) and 'label' (0=human, 1=AI) fields
+# Multilingual data (for evaluation) can be downloaded from:
+#   https://pan.quark.cn/s/5bfda86f9d1f
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+
+# ── Models ───────────────────────────────────────────────────────────────────
+# model1: Backbone / tokenizer model (mBERT)
+# Auto-downloaded from HuggingFace on first use.
+model1: bert-base-multilingual-cased
+
+# model2: Surrogate / proxy model (GPT-2), used only during adversarial training
+# Auto-downloaded from HuggingFace on first use.
+model2: gpt2
+
+# ── Translation Dictionaries ─────────────────────────────────────────────────
+# Directory containing *-English.json dictionaries (4 built-in: Arabic/Chinese/German/Russian)
+# Only change if you have custom dictionaries.
+dict_dir: src/detectors/finetuned/TASTE/translation
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output_dir: models/runs_taste
+
+# ── Training Hyperparameters ─────────────────────────────────────────────────
+batch_size: 16
+lr: 2.0e-5          # detector learning rate
+proxy_lr: 1.0e-5    # surrogate model learning rate
+epochs: 3
+seed: 42
+max_length: 512
+fp16: true
+device: cuda
+
+# ── Adversarial Training Parameters ──────────────────────────────────────────
+# adv_sample_ratio: fraction of training samples that undergo adversarial augmentation
+adv_sample_ratio: 0.15
+# adv_ratio: max fraction of tokens replaced per adversarial sample
+adv_ratio: 0.4
+# max number of training samples (set to -1 for all)
+sample_k: 10000

@@ -1,0 +1,25 @@
+detector: mpu
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_val: null
+dataset_test: null
+sample_k_train: 10000
+sample_k_val: 2000
+sample_k_test: null
+model1: roberta-base
+output_dir: models/runs_mpu
+seed: 114514
+epochs: 3
+train_batch_size: 32
+eval_batch_size: 64
+lr: 5e-5
+weight_decay: 0.0
+warmup_ratio: 0.06
+max_length: 512
+num_workers: 4
+train_kwargs:
+  lamb: 0.4
+  pu_type: dual_softmax_dyn_dtrun
+  prior: 0.2
+  len_thres: 55
+  aug_min_length: 1
+  aug_mode: sentence_deletion-0.25

@@ -1,0 +1,96 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.1829847230608036,
+    "beta1": -4.058622579327078,
+    "standardize": true,
+    "mean": -0.09669921875,
+    "std": 0.45516982001030976,
+    "threshold_raw_p05": -0.11722074343782445,
+    "decision_mode": "acc",
+    "decision_threshold": 0.38038140535354614
+  },
+  "meta": {
+    "detector": "DNAGPT[Llama-3.2-3B-Instruct]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 400,
+      "pos": 190,
+      "neg": 210,
+      "auroc_on_scores": 0.06181704260651629,
+      "metrics_on_probs": {
+        "acc": 0.855,
+        "precision": 0.8402061855670103,
+        "recall": 0.8578947368421053,
+        "f1": 0.8489583333333334,
+        "confusion": {
+          "tp": 163,
+          "tn": 179,
+          "fp": 31,
+          "fn": 27
+        },
+        "num_samples": 400,
+        "num_pos": 190,
+        "num_neg": 210,
+        "auroc": 0.9381829573934837,
+        "aupr": 0.9254505771970946
+      },
+      "feature_dim": 1,
+      "tpr_at_fpr": {
+        "0.05": {
+          "threshold": 0.8322875499725342,
+          "tpr": 0.5736842105263158,
+          "fpr": 0.0380952380952381
+        },
+        "0.01": {
+          "threshold": 0.9681125283241272,
+          "tpr": 0.3684210526315789,
+          "fpr": 0.009523809523809525
+        },
+        "0.001": {
+          "threshold": 0.9893102645874023,
+          "tpr": 0.2789473684210526,
+          "fpr": 0.0
+        },
+        "0.0001": {
+          "threshold": 0.9893102645874023,
+          "tpr": 0.2789473684210526,
+          "fpr": 0.0
+        }
+      },
+      "threshold_mode": "acc",
+      "selected_threshold": {
+        "mode": "acc",
+        "threshold": 0.38038140535354614,
+        "metric_value": 0.8925,
+        "metrics": {
+          "acc": 0.8925,
+          "precision": 0.8209606986899564,
+          "recall": 0.9894736842105263,
+          "f1": 0.8973747016706444,
+          "confusion": {
+            "tp": 188,
+            "tn": 169,
+            "fp": 41,
+            "fn": 2
+          },
+          "num_samples": 400,
+          "num_pos": 190,
+          "num_neg": 210
+        }
+      }
+    },
+    "models": {
+      "model1": "/home/hqdeng7/zhouqi/meta-llama/Llama-3.2-3B-Instruct",
+      "model2": null
+    },
+    "dataset": "data/arxiv.llama32_3b.train.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

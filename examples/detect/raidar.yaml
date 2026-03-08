@@ -1,0 +1,33 @@
+detector: raidar
+data: data/arxiv.qwen3_4b.test.jsonl
+# model1 for rewrite model
+model1: meta-llama/Llama-3.2-3B-Instruct
+batch_size: 128
+threshold: 0.5
+seed: 114514
+sample_k: 2000
+device: 'cuda:0'
+bf16: true
+out: 'runs/raidar'
+save_curves: true
+no_progress: false
+k_runs: 1
+use_vllm: true
+vllm_max_model_len: 4096
+vllm_gpu_memory_utilization: 0.6
+vllm_dtype: auto
+vllm_tensor_parallel_size: 1
+vllm_enforce_eager: false
+attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+detector_kwargs:
+  # rewrite_model: EleutherAI/gpt-neo-125m
+  device: 'cuda:0'
+  max_new_tokens_factor: 0.1
+  rewrite_input_max_tokens: 400
+  use_openai: false
+  # uncomment the following item if you set `use_openai: true`
+  # openai_model: gpt-3.5-turbo
+  calibrator_path: calibration_results/         # change it to a specific json if you want to use your calibrator
+  calibrator_name: platt_lr
+  auto_calibrate: false
+  force_runner_calibration: false

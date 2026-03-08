@@ -1,0 +1,49 @@
+{
+  "calibrator": {
+    "name": "platt_lr",
+    "beta0": -0.36717337774800496,
+    "beta1": 5.3864213708010045,
+    "standardize": true,
+    "mean": 0.4706792645044916,
+    "std": 0.2656276924645187,
+    "threshold_raw_p05": 0.4887861689502353,
+    "decision_boundary_raw_at_prob_0.5": 0.4887861689502353
+  },
+  "meta": {
+    "detector": "Binoculars[GPT-Neo-2.7B|GPT-Neo-2.7B]",
+    "detector_type": "Metric-based",
+    "dev": {
+      "num_samples": 4000,
+      "pos": 2000,
+      "neg": 2000,
+      "auroc_on_scores": 0.99002125
+    },
+    "dev_eval": {
+      "threshold_prob": 0.5,
+      "acc": 0.9765,
+      "precision": 0.9731876861966237,
+      "recall": 0.98,
+      "f1": 0.9765819631290483,
+      "confusion": {
+        "tp": 1960,
+        "tn": 1946,
+        "fp": 54,
+        "fn": 40
+      },
+      "auroc_on_probs": 0.990014749999997,
+      "aupr_on_probs": 0.9874818934991547
+    },
+    "models": {
+      "model1": "/home/lyf/models/GPT-Neo-2.7B",
+      "model2": "/home/lyf/models/GPT-Neo-2.7B"
+    },
+    "dataset": "/home/lyf/dataset/hc3/all.jsonl",
+    "fit": {
+      "name": "platt_lr",
+      "l2": 0.01,
+      "max_iter": 200,
+      "tol": 1e-06,
+      "standardize": true
+    }
+  }
+}

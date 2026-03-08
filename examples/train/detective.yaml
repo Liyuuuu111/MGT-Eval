@@ -1,0 +1,32 @@
+detector: detective
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_val: null
+sample_k_train: 360
+sample_k_val: 40
+model1: princeton-nlp/unsup-simcse-roberta-base
+output_dir: models/runs_detective
+seed: 114514
+epochs: 50
+train_batch_size: 32
+eval_batch_size: 64
+lr: 2e-5
+weight_decay: 1e-4
+max_length: 512
+num_workers: 0
+devices: 1
+train_kwargs:
+  projection_size: 768
+  classifier_dim: 2
+  temperature: 0.07
+  warmup_steps: 2000
+  beta1: 0.9
+  beta2: 0.98
+  eps: 1e-6
+  a: 1.0
+  b: 1.0
+  c: 1.0
+  d: 1.0
+  one_loss: false
+  only_classifier: false
+  freeze_embedding_layer: false
+  topk: 10

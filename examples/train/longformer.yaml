@@ -1,0 +1,26 @@
+detector: longformer
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_val: null
+dataset_test: null
+sample_k_train: null
+sample_k_val: null
+sample_k_test: null
+model1: allenai/longformer-base-4096
+tokenizer: roberta-base
+output_dir: models/runs_longformer
+seed: 114514
+epochs: 3
+train_batch_size: 2
+eval_batch_size: 4
+lr: 2e-5
+weight_decay: 0.01
+warmup_ratio: 0.06
+grad_accum_steps: 1
+max_length: 2048
+fp16: true
+device: 'cuda:0'
+train_kwargs:
+  label_smoothing: 0.0
+  train_ratio: 8.0
+  val_ratio: 1.0
+  test_ratio: 1.0

@@ -1,0 +1,28 @@
+detector: raidar
+dataset_train: data/arxiv.llama32_3b.train.jsonl
+sample_k_train: 0
+seed: 114514
+train_batch_size: 128
+device: 'cuda:0'
+bf16: true
+calibrator_name: platt_lr
+l2: 0.01
+max_iter: 200
+tol: 1e-06
+no_standardize: false
+mode: acc
+out: null
+out_dir: calibration_results
+no_progress: false
+model1: meta-llama/Llama-3.2-3B-Instruct
+use_vllm: true
+vllm_max_model_len: 4096
+vllm_gpu_memory_utilization: 0.6
+vllm_dtype: auto
+vllm_tensor_parallel_size: 1
+vllm_enforce_eager: false
+detector_kwargs:
+  device: 'cuda:0'
+  max_new_tokens_factor: 0.1
+  rewrite_input_max_tokens: 400
+  use_openai: false
