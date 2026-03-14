@@ -1,5 +1,7 @@
 # MGTEval
 
+![MGTEval workflow](./workflow.png)
+
 <p align="center">
   <a href="./README.md"><strong>English</strong></a> |
   <a href="./README.zh.md"><strong>中文</strong></a>
