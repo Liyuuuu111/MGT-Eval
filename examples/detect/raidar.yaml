@@ -1,7 +1,7 @@
 detector: raidar
-data: data/arxiv.qwen3_4b.test.jsonl
+data: data/qwen3_4b_2507.example_human.test.jsonl
 # model1 for rewrite model
-model1: meta-llama/Llama-3.2-3B-Instruct
+model1: Qwen/Qwen3-4B-Instruct-2507
 batch_size: 128
 threshold: 0.5
 seed: 114514
@@ -18,7 +18,7 @@ vllm_gpu_memory_utilization: 0.6
 vllm_dtype: auto
 vllm_tensor_parallel_size: 1
 vllm_enforce_eager: false
-attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+attack_dataset: null
 detector_kwargs:
   # rewrite_model: EleutherAI/gpt-neo-125m
   device: 'cuda:0'

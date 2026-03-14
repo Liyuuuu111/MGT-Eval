@@ -1,12 +1,12 @@
 detector: detective
-dataset_train: data/arxiv.llama32_3b.train.jsonl
-dataset_val: null
-sample_k_train: 360
-sample_k_val: 40
+dataset_train: data/qwen3_4b_2507.example_human.train.jsonl
+dataset_val: data/qwen3_4b_2507.example_human.dev.jsonl
+sample_k_train: 0
+sample_k_val: 0
 model1: princeton-nlp/unsup-simcse-roberta-base
 output_dir: models/runs_detective
 seed: 114514
-epochs: 50
+epochs: 10
 train_batch_size: 32
 eval_batch_size: 64
 lr: 2e-5

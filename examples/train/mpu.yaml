@@ -1,9 +1,9 @@
 detector: mpu
-dataset_train: data/arxiv.llama32_3b.train.jsonl
-dataset_val: null
+dataset_train: data/qwen3_4b_2507.example_human.train.jsonl
+dataset_val: data/qwen3_4b_2507.example_human.dev.jsonl
 dataset_test: null
-sample_k_train: 10000
-sample_k_val: 2000
+sample_k_train: 0
+sample_k_val: 0
 sample_k_test: null
 model1: roberta-base
 output_dir: models/runs_mpu

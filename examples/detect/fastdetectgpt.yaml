@@ -1,5 +1,5 @@
 detector: fastdetectgpt
-data: data/arxiv.qwen3_4b.test.jsonl
+data: data/qwen3_4b_2507.example_human.test.jsonl
 model1: EleutherAI/gpt-neo-125m
 model2: EleutherAI/gpt-neo-125m
 batch_size: 8
@@ -11,7 +11,7 @@ bf16: true
 out: 'runs/fastdetectgpt'
 save_curves: true
 no_progress: false
-attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+attack_dataset: null
 k_runs: 1
 detector_kwargs:
   # scoring_model_name: EleutherAI/gpt-neo-125m

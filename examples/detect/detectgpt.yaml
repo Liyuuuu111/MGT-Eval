@@ -1,5 +1,5 @@
 detector: detectgpt
-data: data/arxiv.qwen3_4b.test.jsonl
+data: data/qwen3_4b_2507.example_human.test.jsonl
 # score model for model1, mask model for model2
 model1: EleutherAI/gpt-neo-125m
 model2: google-t5/t5-small
@@ -11,7 +11,7 @@ device: 'cuda:0'
 bf16: true
 out: 'runs/detectgpt'
 save_curves: true
-attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+attack_dataset: null
 no_progress: false
 k_runs: 1
 detector_kwargs:

@@ -1,6 +1,6 @@
 detector: coco
-dataset_train: data/arxiv.llama32_3b.train.jsonl
-dataset_val: null
+dataset_train: data/qwen3_4b_2507.example_human.train.jsonl
+dataset_val: data/qwen3_4b_2507.example_human.dev.jsonl
 sample_k_train: null
 sample_k_val: null
 model1: roberta-base

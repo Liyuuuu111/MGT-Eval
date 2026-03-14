@@ -1,5 +1,5 @@
 detector: binoculars
-dataset_train: data/arxiv.llama32_3b.train.jsonl
+dataset_train: data/qwen3_4b_2507.example_human.train.jsonl
 sample_k_train: 0
 seed: 114514
 train_batch_size: 32

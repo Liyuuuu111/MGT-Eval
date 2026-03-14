@@ -1,6 +1,6 @@
 detector: hfcls
-data: data/arxiv.qwen3_4b.test.jsonl
-model1: runs_hfcls/hfcls_roberta-base_YYYYMMDD-HHMMSS/best
+data: data/qwen3_4b_2507.example_human.test.jsonl
+model1: null
 tokenizer: null
 ckpt_base: null
 lora_dir: null
@@ -15,4 +15,4 @@ out: 'runs/hfcls'
 save_curves: true
 no_progress: false
 k_runs: 1
-attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+attack_dataset: null

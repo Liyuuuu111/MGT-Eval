@@ -1,9 +1,9 @@
 detector: greater
-dataset_train: data/arxiv.llama32_3b.train.jsonl
-dataset_aux1: data/arxiv.llama32_3b.train.jsonl
-sample_k_train: 400
+dataset_train: data/qwen3_4b_2507.example_human.train.jsonl
+dataset_aux1: data/qwen3_4b_2507.example_human.train.jsonl
+sample_k_train: 0
 sample_k_val: 0
-sample_k_aux1: 400
+sample_k_aux1: 0
 # change it into xlm-roberta-base for the original paper
 # model1: target detector
 model1: albert/albert-base-v2

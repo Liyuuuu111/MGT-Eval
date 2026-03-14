@@ -74,6 +74,59 @@ def _is_local_hf_dir(path: str) -> bool:
     return os.path.isdir(path) and os.path.isfile(os.path.join(path, "config.json"))
 
 
+def _has_hf_weight_files(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    names = (
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "tf_model.h5",
+        "flax_model.msgpack",
+    )
+    return any(os.path.isfile(os.path.join(path, n)) for n in names)
+
+
+def _find_state_dict_file(path: str) -> Optional[str]:
+    if not os.path.isdir(path):
+        return None
+    blocked = {
+        "pytorch_model.bin",
+        "adapter_model.bin",
+        "optimizer.pt",
+        "scheduler.pt",
+        "trainer_state.json",
+    }
+    cand: List[Tuple[float, str]] = []
+    for pat in ("*.pt", "*.bin"):
+        for p in Path(path).glob(pat):
+            if not p.is_file():
+                continue
+            name = p.name
+            if name in blocked:
+                continue
+            try:
+                mt = float(p.stat().st_mtime)
+            except Exception:
+                mt = -1.0
+            cand.append((mt, str(p)))
+    if not cand:
+        return None
+    cand.sort(key=lambda x: x[0], reverse=True)
+    return cand[0][1]
+
+
+def _unwrap_state_dict(state: Any) -> Any:
+    if not isinstance(state, dict):
+        return state
+    for key in ("state_dict", "model_state_dict", "model"):
+        v = state.get(key)
+        if isinstance(v, dict):
+            return v
+    return state
+
+
 def _resolve_model(model: Optional[str], fallback: str) -> str:
     if not model:
         return fallback
@@ -291,23 +344,61 @@ class TasteDetector(DetectorBase):
         self._device = device
 
         tok_path = self.model1_path
-        if self.model_path and _is_local_hf_dir(self.model_path):
-            # save_pretrained 目录 — tokenizer 同名目录
-            model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
-            # 尝试从 checkpoint 目录读取 tokenizer，否则回退到 model1_path
-            try:
-                tok = AutoTokenizer.from_pretrained(self.model_path)
-            except Exception:
-                tok = AutoTokenizer.from_pretrained(tok_path)
-        elif self.model_path and os.path.isfile(self.model_path):
+        model_path = str(self.model_path).strip() if self.model_path else ""
+        if model_path and os.path.isdir(model_path):
+            # HF save_pretrained directory with standard weight files.
+            if _is_local_hf_dir(model_path) and _has_hf_weight_files(model_path):
+                model = AutoModelForSequenceClassification.from_pretrained(model_path)
+                try:
+                    tok = AutoTokenizer.from_pretrained(model_path)
+                except Exception:
+                    tok = AutoTokenizer.from_pretrained(tok_path)
+            else:
+                # Compatibility: directory contains only state_dict checkpoint (*.pt/*.bin).
+                ckpt_file = _find_state_dict_file(model_path)
+                if not ckpt_file:
+                    raise FileNotFoundError(
+                        f"[TASTE] model_path='{model_path}' has config/tokenizer but no HF weights "
+                        f"(pytorch_model.bin/model.safetensors) and no state_dict (*.pt/*.bin)."
+                    )
+                cfg_src = model_path if _is_local_hf_dir(model_path) else tok_path
+                cfg = AutoConfig.from_pretrained(cfg_src, num_labels=2)
+                model = AutoModelForSequenceClassification.from_pretrained(tok_path, config=cfg)
+                state = torch.load(ckpt_file, map_location="cpu")
+                state = _unwrap_state_dict(state)
+                if isinstance(state, dict):
+                    state = {
+                        (k[7:] if isinstance(k, str) and k.startswith("module.") else k): v
+                        for k, v in state.items()
+                    }
+                missing, unexpected = model.load_state_dict(state, strict=False)
+                try:
+                    tok = AutoTokenizer.from_pretrained(model_path)
+                except Exception:
+                    tok = AutoTokenizer.from_pretrained(tok_path)
+                print(
+                    f"[TASTE] loaded state_dict from {ckpt_file} "
+                    f"(missing={len(missing)}, unexpected={len(unexpected)})"
+                )
+        elif model_path and os.path.isfile(model_path):
             # state_dict 文件 (.pt / .bin) — 用 model1_path 初始化架构
             cfg = AutoConfig.from_pretrained(tok_path, num_labels=2)
             model = AutoModelForSequenceClassification.from_pretrained(
                 tok_path, config=cfg
             )
-            state = torch.load(self.model_path, map_location="cpu")
-            model.load_state_dict(state)
+            state = torch.load(model_path, map_location="cpu")
+            state = _unwrap_state_dict(state)
+            if isinstance(state, dict):
+                state = {
+                    (k[7:] if isinstance(k, str) and k.startswith("module.") else k): v
+                    for k, v in state.items()
+                }
+            missing, unexpected = model.load_state_dict(state, strict=False)
             tok = AutoTokenizer.from_pretrained(tok_path)
+            print(
+                f"[TASTE] loaded state_dict from {model_path} "
+                f"(missing={len(missing)}, unexpected={len(unexpected)})"
+            )
         else:
             # 没有指定权重 — 直接用 model1_path（可能是已 fine-tune 的目录）
             cfg = AutoConfig.from_pretrained(tok_path, num_labels=2)

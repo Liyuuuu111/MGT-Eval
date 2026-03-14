@@ -1,5 +1,5 @@
 detector: dnadetectllm
-data: data/arxiv.qwen3_4b.test.jsonl
+data: data/qwen3_4b_2507.example_human.test.jsonl
 # observer_model for model1, performer_model for model2
 model1: EleutherAI/gpt-neo-125m
 model2: EleutherAI/gpt-neo-125m
@@ -12,7 +12,7 @@ bf16: true
 out: 'runs/dnadetectllm'
 save_curves: true
 no_progress: false
-attack_dataset: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+attack_dataset: null
 k_runs: 1
 detector_kwargs:
   # observer_model: EleutherAI/gpt-neo-125m

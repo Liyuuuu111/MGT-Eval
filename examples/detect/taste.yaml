@@ -3,45 +3,31 @@
 #        in Zero-Shot Language via Adversarial Training
 # Venue: ICLR 2026 | Authors: Yuanfan Li, Qi Zhou, Zexuan Xie
 #
-# Multilingual evaluation dataset download: https://pan.quark.cn/s/5bfda86f9d1f
-# Dataset files (in D:\MGT-Eval-main (3)\TASTE\dataset\): ar.jsonl, zh.jsonl, de.jsonl, ru.jsonl
 # Translation dictionaries (built-in): src/detectors/finetuned/TASTE/translation/
 # Default model save path: models/runs_taste
+# clean dataset test: uncomment data and  attack_dataset (line 12 and line 35)
 
 detector: taste
 
-# ── Evaluation Data ───────────────────────────────────────────────────────────
-# Supports:
-#   (1) Single file: path to a .jsonl or .json file
-#       data: data/ar.jsonl
-#   (2) Directory:   path to a directory — all .json/.jsonl files will be loaded
-#       data: D:\MGT-Eval-main (3)\TASTE\dataset
-#
-# Multilingual dataset download: https://pan.quark.cn/s/5bfda86f9d1f
-data: data/ar.jsonl
-
+# data: TASTE/datasets/test.jsonl
+data: TASTE/datasets/original_testset.jsonl
 # ── Models ───────────────────────────────────────────────────────────────────
 # model1: Tokenizer model matching the one used during training (mBERT)
 model1: bert-base-multilingual-cased
 
 # model_path: Path to the trained TASTE detector checkpoint directory
 # (generated after training, e.g. models/runs_taste_YYYYMMDD-HHMMSS/final)
-model_path: models/runs_taste_YYYYMMDD-HHMMSS/final
-
-# model2: Surrogate model (not used at inference, kept for config consistency)
-model2: gpt2
-
-# ── Inference Parameters ─────────────────────────────────────────────────────
+model_path: TASTE/detector
 batch_size: 8
 threshold: 0.5
-seed: 42
-sample_k: 2000
+seed: 114514
+sample_k: 0
+device: 'cuda:0'
 max_length: 512
-device: cuda
 fp16: true
-
-# ── Output ───────────────────────────────────────────────────────────────────
-out: runs/taste
+out: 'runs/taste'
 save_curves: true
 no_progress: false
 k_runs: 1
+# attack_dataset: null
+attack_dataset: TASTE/datasets/attacked_testset.jsonl

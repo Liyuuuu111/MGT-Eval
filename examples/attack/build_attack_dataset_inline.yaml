@@ -2,8 +2,8 @@
 # ：mgteval-cli attack mgt_eval/examples/attack/build_attack_dataset_inline.yaml
 
 # =====  =====
-data: data/arxiv.qwen3_4b.test.jsonl
-out: data/arxiv.qwen3_4b.test.attack.jsonl
+data: data/qwen3_4b_2507.example_human.test.jsonl
+out: data/qwen3_4b_2507.example_human.test.attack.jsonl
 save_attack_outputs: false
 
 # ===== attack-only  =====

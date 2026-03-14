@@ -4,9 +4,9 @@
 
 # ===== 输入/输出 =====
 # data: 输入数据集（json/jsonl 或可被 load_dataset_unified 解析的 spec）
-data: data/arxiv.qwen3_4b.test.jsonl
+data: data/qwen3_4b_2507.example_human.test.jsonl
 # out: 输出攻击后数据集路径（jsonl）
-out: data/attack/arxiv.qwen3_4b.test.attack.jsonl
+out: data/attack/qwen3_4b_2507.example_human.test.attack.jsonl
 
 # ===== 攻击配置 =====
 # attacks_config: 完整攻击配置文件（JSON）。建议使用 examples/attack/attacks_all.json。
