@@ -13,7 +13,7 @@
 这里是我们 `ACL 2026 Demo` 投稿 `MGTEval: An Interactive Platform for Systematic Evaluation of Machine-Generated Text Detectors` 与 `ICLR 2026` 论文 [Learning From Dictionary: Enhancing Robustness of Machine-Generated Text Detection in Zero-Shot Language via Adversarial Training](https://openreview.net/forum?id=bTcFHJo1Zk) 的官方代码仓库。  
 如需查看 ICLR 2026 方法 **TASTE** 的实现，请导航到 [`src/detectors/finetuned/TASTE/README.md`](src/detectors/finetuned/TASTE/README.md)。  
 本仓库介绍了 MGTEval：一个用于机器生成文本检测系统化评测的交互式平台，覆盖数据构建、数据攻击、检测器训练与性能评估的一体化工作流。  
-该工作主要由西安交通大学（XJTU）的 `Yuanfan Li` 与 `Qi Zhou` 在 `Xiaoming Liu` 教授指导下完成，两位作者的贡献比例约为 70% 与 30%。
+该工作主要由西安交通大学（XJTU）的 `Yuanfan Li` 与 `Qi Zhou` 在 `Xiaoming Liu` 教授指导下完成。
 
 ---
 
