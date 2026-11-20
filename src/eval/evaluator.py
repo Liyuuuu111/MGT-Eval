@@ -992,7 +992,7 @@ def evaluate_detector(
             runs_iter.set_description(desc)
 
             if show_progress:
-                tpr_points = _tpr_points_str(fpr_targets, tpr_at_fpr)
+                tpr_points = _tpr_points_str(fpr_targets, _tpr_at_fpr)
                 print(f"[MGTEval] [run {ridx}] done: acc={acc:.4f} f1={f1:.4f} auroc={auroc:.4f} aupr={aupr:.4f} ece={calib['ece']} "
                       f"(rank={ranking_src}) tpr@fprs=[{tpr_points}] time={eval_time:.2f}s")
 
@@ -1022,6 +1022,8 @@ def evaluate_detector(
             if ridx == 0:
                 first_res = res_i
                 first_examples = examples
+                first_labels_seq = list(labels_seq)
+                first_preds_seq = list(preds_seq)
                 first_used_group_cols = list(used_group_cols)
                 first_probs_seq = probs_seq
                 first_ranking_vec = ranking_vec
@@ -1199,6 +1201,7 @@ def evaluate_detector(
 
         if atk_specs and (first_examples is not None):
             base_for_asr = first_examples
+            base_cache = _base_correct_cache_from_preds(first_examples, first_labels_seq, first_preds_seq)
             attacks_out: Dict[str, Any] = {}
 
             if show_progress:
